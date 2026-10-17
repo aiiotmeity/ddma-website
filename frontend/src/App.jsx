@@ -37,8 +37,11 @@ import {
 } from "lucide-react";
 import "./App.css";
 
-const API_BASE = (import.meta.env.VITE_API_URL || "http://127.0.0.1:8000/api").replace(/\/+$/, "");
-const REFRESH_MS = 60_000;
+const API_BASE = (
+  import.meta.env.VITE_API_BASE_URL ||
+  "http://127.0.0.1:8000/api"
+).replace(/\/+$/, "");const REFRESH_MS = 60_000;
+
 const STALE_MINUTES = 30;
 const MAX_HISTORY = 5000;
 const PAGE_SIZE = 10;
