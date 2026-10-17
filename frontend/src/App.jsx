@@ -18,7 +18,6 @@ import {
   CloudRain,
   Droplets,
   Thermometer,
-  RefreshCw,
   Clock,
   AlertTriangle,
   ShieldCheck,
@@ -33,15 +32,19 @@ import {
   ChevronRight,
   Landmark,
   Siren,
-  ListTree,
+  CloudSun,
+  Trees,
+  Cpu,
+  Camera,
 } from "lucide-react";
 import "./App.css";
 
 const API_BASE = (
   import.meta.env.VITE_API_BASE_URL ||
+  import.meta.env.VITE_API_URL ||
   "http://127.0.0.1:8000/api"
-).replace(/\/+$/, "");const REFRESH_MS = 60_000;
-
+).replace(/\/+$/, "");
+const REFRESH_MS = 60_000;
 const STALE_MINUTES = 30;
 const MAX_HISTORY = 5000;
 const PAGE_SIZE = 10;
@@ -285,6 +288,46 @@ function useMediaQuery(query) {
   return matches;
 }
 
+const LOGOS = {
+  ddma: { src: "/logos/ddma.png", name: "DDMA" },
+  imd: { src: "/logos/imd.png", name: "IMD" },
+  forest: { src: "/logos/forest.png", name: "Kerala Forest Department" },
+  asiet: { src: "/logos/asiet.png", name: "ASIET" },
+};
+
+function Logo({ id, fallback }) {
+  const [failed, setFailed] = useState(false);
+  const logo = LOGOS[id];
+  if (failed) return fallback ?? null;
+  return (
+    <img
+      src={logo.src}
+      alt={`${logo.name} logo`}
+      className="logo-img"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
+function StationPhoto() {
+  const [failed, setFailed] = useState(false);
+  if (failed) return null;
+  return (
+    <figure className="about-photo">
+      <img
+        src="/images/arg-station.jpg"
+        alt="Solar-powered Automatic Rain Gauge station with rain gauge, sensors and data logger inside a fenced enclosure"
+        loading="lazy"
+        onError={() => setFailed(true)}
+      />
+      <figcaption>
+        <Camera size={14} />
+        <span>Automatic Rain Gauge Station at Illithode</span>
+      </figcaption>
+    </figure>
+  );
+}
+
 function LiveClock() {
   const [now, setNow] = useState(new Date());
   useEffect(() => {
@@ -294,7 +337,7 @@ function LiveClock() {
   return <span>{fullFmt.format(now)} IST</span>;
 }
 
-function KpiCard({ title, value, unit, icon: Icon, accent, sub, trend }) {
+function KpiCard({ title, value, unit, icon: Icon, accent, sub }) {
   return (
     <article className={`kpi kpi-${accent}`}>
       <div className="kpi-head">
@@ -306,11 +349,6 @@ function KpiCard({ title, value, unit, icon: Icon, accent, sub, trend }) {
       </div>
       <div className="kpi-foot">
         <span>{sub}</span>
-        {/* {trend != null && trend !== 0 && (
-          <span className={`trend ${trend > 0 ? "up" : "down"}`}>
-            {trend > 0 ? "▲" : "▼"} {Math.abs(trend).toFixed(1)}
-          </span>
-        )} */}
       </div>
     </article>
   );
@@ -337,7 +375,6 @@ export default function App() {
   const [stationId, setStationId] = useState(() => readSelected() || DEFAULT_STATIONS[0].id);
   const [records, setRecords] = useState({});
   const [histories, setHistories] = useState({});
-  const [refreshing, setRefreshing] = useState(false);
   const [range, setRange] = useState("24h");
   const [tab, setTab] = useState("rainfall");
   const [page, setPage] = useState(0);
@@ -361,7 +398,6 @@ export default function App() {
   const refreshAll = useCallback(async () => {
     const active = stationsRef.current.filter((s) => s.status !== "pending");
     if (!active.length) return;
-    setRefreshing(true);
 
     const results = await Promise.all(
       active.map(async (s) => {
@@ -395,8 +431,6 @@ export default function App() {
       });
       return next;
     });
-
-    setRefreshing(false);
   }, []);
 
   useEffect(() => {
@@ -434,8 +468,6 @@ export default function App() {
 
   const latestRaw = getLatestRaw(result);
   const latest = toReading(latestRaw) || {};
-  const previous = history.length > 1 ? history[history.length - 2] : null;
-  const trend = (k) => (latest[k] != null && previous?.[k] != null ? latest[k] - previous[k] : null);
 
   const category = classifyRain(latest.rainfall);
   const level = category?.level ?? "none";
@@ -466,8 +498,6 @@ export default function App() {
   const pageCount = Math.max(1, Math.ceil(tableRows.length / PAGE_SIZE));
   const safePage = Math.min(page, pageCount - 1);
   const pageRows = tableRows.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
-
-  const allFields = Object.entries(latestRaw).filter(([, v]) => v === null || typeof v !== "object");
 
   const statusOf = (s) => {
     if (s.status === "pending") return "pending";
@@ -587,7 +617,7 @@ export default function App() {
       <header className="masthead">
         <div className="wrap masthead-inner">
           <div className="brand">
-            <div className="seal"><ShieldCheck size={34} /></div>
+            <div className="seal"><Logo id="ddma" fallback={<ShieldCheck size={34} />} /></div>
             <div>
               <h1>District Disaster Management Authority</h1>
               <p className="ml">ജില്ലാ ദുരന്ത നിവാരണ അതോറിറ്റി · എറണാകുളം</p>
@@ -613,10 +643,6 @@ export default function App() {
             <a href="#stations">Stations</a>
             <a href="#about">About</a>
           </div>
-          {/* <button className="refresh-btn" onClick={refreshAll} disabled={refreshing} aria-label="Refresh data">
-            <RefreshCw size={15} className={refreshing ? "spin" : ""} />
-            <span className="hide-xs">{refreshing ? "Updating" : "Refresh"}</span>
-          </button> */}
         </div>
       </nav>
 
@@ -697,9 +723,9 @@ export default function App() {
             </div>
           ) : (
             <div className="kpi-grid">
-              <KpiCard title="Rainfall" value={fmt(latest.rainfall)} unit="mm" icon={CloudRain} accent="rain" sub={category?.label ?? "IMD category"} trend={trend("rainfall")} />
-              <KpiCard title="Temperature" value={fmt(latest.temperature)} unit="°C" icon={Thermometer} accent="temp" sub="Air temperature" trend={trend("temperature")} />
-              <KpiCard title="Relative Humidity" value={fmt(latest.humidity, 0)} unit="%" icon={Droplets} accent="hum" sub="Ambient RH" trend={trend("humidity")} />
+              <KpiCard title="Rainfall" value={fmt(latest.rainfall)} unit="mm" icon={CloudRain} accent="rain" sub={category?.label ?? "IMD category"} />
+              <KpiCard title="Temperature" value={fmt(latest.temperature)} unit="°C" icon={Thermometer} accent="temp" sub="Air temperature" />
+              <KpiCard title="Relative Humidity" value={fmt(latest.humidity, 0)} unit="%" icon={Droplets} accent="hum" sub="Ambient RH" />
             </div>
           )}
         </section>
@@ -749,7 +775,7 @@ export default function App() {
           </div>
 
           <div className="stat-row">
-            <div><span>Peak Rainfall</span><strong>{fmt(sRain.max)} mm</strong></div>
+            <div><span>Rainfall</span><strong>{fmt(sRain.max)} mm</strong></div>
             <div><span>Temp. Max / Min</span><strong>{fmt(sTemp.max)}° / {fmt(sTemp.min)}°</strong></div>
             <div><span>Avg. Temperature</span><strong>{fmt(sTemp.avg)} °C</strong></div>
             <div><span>Avg. Humidity</span><strong>{fmt(sHum.avg, 0)} %</strong></div>
@@ -857,35 +883,77 @@ export default function App() {
           </div>
         </section>
 
-        {/* {allFields.length > 0 && !isPending && (
-          <section className="section card">
-            <h2><ListTree size={20} /> All Reported Parameters</h2>
-            <div className="param-grid">
-              {allFields.map(([k, v]) => (
-                <div key={k}><span>{k}</span><strong>{v === null || v === "" ? "—" : String(v)}</strong></div>
-              ))}
-            </div>
-          </section>
-        )} */}
-
         <section id="about" className="section card about">
+          <span className="about-eyebrow">About the initiative</span>
           <h2>About the ARG Initiative</h2>
-          <p>
-            Rainfall over the upstream catchment governs runoff and river flow at Kalady, which is not
-            adequately monitored by existing IMD stations. This network of Automatic Rain Gauges
-            provides continuous observations to support flood preparedness and early warning in
-            Ernakulam district.
-          </p>
-          <p>
-            The project is IMD-compliant and proposed jointly with the Forest Department and DDMA.
-          </p>
+
+          <div className="about-top">
+            <div className="about-lead">
+              <p>
+                Rainfall over the upstream catchment governs runoff and river flow at Kalady, which is not
+                adequately monitored by existing IMD stations. This network of Automatic Rain Gauges
+                provides continuous observations to support flood preparedness and early warning in
+                Ernakulam district.
+              </p>
+              <p>
+                The project follows <strong>IMD standards</strong> and is being developed in collaboration
+                with the <strong>Forest Department</strong> and <strong>DDMA</strong>.
+              </p>
+            </div>
+
+            <StationPhoto />
+          </div>
+
+          <h2 className="about-sub">A joint effort</h2>
+
+          <div className="partner-grid">
+            <article className="partner partner-ddma">
+              <div className="partner-icon"><Logo id="ddma" fallback={<ShieldCheck size={22} />} /></div>
+              <span className="partner-role">Lead Agency</span>
+              <h4>District Disaster Management Authority, Ernakulam</h4>
+              <p>
+                Leads and coordinates the initiative, and puts the observations to work in flood
+                preparedness, early warnings and response planning across the district.
+              </p>
+            </article>
+
+            <article className="partner partner-imd">
+              <div className="partner-icon"><Logo id="imd" fallback={<CloudSun size={22} />} /></div>
+              <span className="partner-role">Standards &amp; Guidance</span>
+              <h4>India Meteorological Department</h4>
+              <p>
+                The stations follow IMD standards for siting and instrumentation, so every reading is
+                reliable and can be compared with the national observation network.
+              </p>
+            </article>
+
+            <article className="partner partner-forest">
+              <div className="partner-icon"><Logo id="forest" fallback={<Trees size={22} />} /></div>
+              <span className="partner-role">Site Partner</span>
+              <h4>Kerala Forest Department</h4>
+              <p>
+                Supports the stations in the forested upper catchment, from choosing the sites and
+                providing access to helping keep the equipment safe in remote terrain.
+              </p>
+            </article>
+
+            <article className="partner partner-asiet">
+              <div className="partner-icon"><Logo id="asiet" fallback={<Cpu size={22} />} /></div>
+              <span className="partner-role">Technology Partner</span>
+              <h4>Adi Shankara Institute of Engineering and Technology</h4>
+              <p>
+                The <strong>Centre for AI-IoT Innovation</strong> designed and built the sensor network,
+                the cloud data pipeline and this live monitoring dashboard.
+              </p>
+            </article>
+          </div>
         </section>
       </main>
 
       <footer className="gov-footer">
         <div className="wrap footer-inner">
           <div>
-            <strong>District Disaster Management Authority, Ernakulam</strong>
+            <strong>DDMA</strong>
             <p>Civil Station, Kakkanad, Ernakulam, Kerala</p>
           </div>
           <div>
@@ -901,8 +969,20 @@ export default function App() {
             <p>
               Centre for AI-IoT Innovation
               <br />
-              <span className="inst">Adi Shankara Institute of Engineering and Technology</span>
+              <span className="inst">ASIET</span>
             </p>
+          </div>
+        </div>
+        <div className="footer-partners">
+          <div className="wrap footer-partners-inner">
+            <span>In collaboration with</span>
+            <div className="footer-logos">
+              {Object.entries(LOGOS).map(([id, logo]) => (
+                <div className="footer-logo" key={id} title={logo.name}>
+                  <Logo id={id} fallback={<span className="footer-logo-name">{logo.name}</span>} />
+                </div>
+              ))}
+            </div>
           </div>
         </div>
         <div className="footer-base">
