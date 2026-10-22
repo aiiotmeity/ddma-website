@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import L from "leaflet";
+import "leaflet/dist/leaflet.css";
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -24,7 +26,6 @@ import {
   Phone,
   Download,
   MapPin,
-  Radio,
   BarChart3,
   Table2,
   Info,
@@ -36,6 +37,20 @@ import {
   Trees,
   Cpu,
   Camera,
+  Database,
+  FileDown,
+  RefreshCw,
+  LogIn,
+  LogOut,
+  Lock,
+  User,
+  Eye,
+  EyeOff,
+  Map as MapIcon,
+  ExternalLink,
+  Navigation,
+  KeyRound,
+  UserCircle2,
 } from "lucide-react";
 import "./App.css";
 
@@ -46,11 +61,21 @@ const API_BASE = (
 ).replace(/\/+$/, "");
 const REFRESH_MS = 60_000;
 const STALE_MINUTES = 30;
-const MAX_HISTORY = 5000;
 const PAGE_SIZE = 10;
-const HISTORY_PREFIX = "ddma_arg_history_v2_";
-const LEGACY_HISTORY_KEY = "ddma_arg_history_v1";
+const HISTORY_INTERVAL_MIN = 30;
+const MAX_CHART_POINTS = 1500;
+const OLD_STORAGE_KEYS = ["ddma_arg_history_v1", "ddma_arg_history_v2_ARGS1", "ddma_arg_history_v2_ARGS2"];
 const SELECTED_KEY = "ddma_arg_selected_station";
+const SESSION_KEY = "ddma_arg_session";
+
+const STATION_LOCATIONS = {
+  ARGS1: { lat: 10.20395751276211, lng: 76.53282253409051 },
+  ARGS2: { lat: 10.15, lng: 76.733331 },
+};
+
+const MAP_DEFAULT_CENTER = [10.177, 76.633];
+
+const googleMapsUrl = ({ lat, lng }) => `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
 
 const DEFAULT_STATIONS = [
   { id: "ARGS1", name: "Illithode", status: "active" },
@@ -58,11 +83,11 @@ const DEFAULT_STATIONS = [
 ];
 
 const RANGES = [
-  { id: "6h", label: "6 Hours", short: "6H", ms: 6 * 3600e3 },
-  { id: "24h", label: "24 Hours", short: "24H", ms: 24 * 3600e3 },
-  { id: "7d", label: "7 Days", short: "7D", ms: 7 * 86400e3 },
-  { id: "30d", label: "30 Days", short: "30D", ms: 30 * 86400e3 },
-  { id: "all", label: "All", short: "All", ms: Infinity },
+  { id: "6h", label: "6 Hours", short: "6H", hours: 6 },
+  { id: "24h", label: "24 Hours", short: "24H", hours: 24 },
+  { id: "7d", label: "7 Days", short: "7D", hours: 168 },
+  { id: "30d", label: "30 Days", short: "30D", hours: 720 },
+  // { id: "all", label: "All", short: "All", hours: 0 },
 ];
 
 const CHART_TABS = [
@@ -154,38 +179,67 @@ function getLatestRaw(json) {
   return data.latest && typeof data.latest === "object" ? data.latest : data;
 }
 
-function extractReadings(json) {
-  const data = json?.data || {};
-  const apiHistory = [data.history, data.records, data.readings].find(Array.isArray) || [];
-  return [...apiHistory.map(toReading), toReading(getLatestRaw(json))].filter(Boolean);
-}
-
-function loadHistory(id) {
+function clearOldBrowserHistory() {
   try {
-    let raw = localStorage.getItem(HISTORY_PREFIX + id);
-    if (!raw && id === DEFAULT_STATIONS[0].id) raw = localStorage.getItem(LEGACY_HISTORY_KEY);
-    const parsed = JSON.parse(raw || "[]");
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveHistory(id, list) {
-  try {
-    localStorage.setItem(HISTORY_PREFIX + id, JSON.stringify(list));
+    OLD_STORAGE_KEYS.forEach((k) => localStorage.removeItem(k));
   } catch {
     return;
   }
 }
 
-function mergeHistory(existing, incoming) {
-  const map = new Map();
-  [...existing, ...incoming].forEach((r) => {
-    if (!r || (r.t == null && !r.label)) return;
-    map.set(r.t ?? r.label, r);
-  });
-  return [...map.values()].sort((a, b) => (a.t ?? 0) - (b.t ?? 0)).slice(-MAX_HISTORY);
+function downsample(rows, maxPoints) {
+  if (rows.length <= maxPoints) return rows;
+  const size = Math.ceil(rows.length / maxPoints);
+  const out = [];
+  for (let i = 0; i < rows.length; i += size) {
+    const chunk = rows.slice(i, i + size);
+    const avg = (key) => {
+      const vals = chunk.map((r) => r[key]).filter((v) => v != null);
+      return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+    };
+    const rain = chunk.map((r) => r.rainfall).filter((v) => v != null);
+    out.push({
+      ...chunk[chunk.length - 1],
+      rainfall: rain.length ? Math.max(...rain) : null,
+      temperature: avg("temperature"),
+      humidity: avg("humidity"),
+    });
+  }
+  return out;
+}
+
+let authToken = null;
+let onAuthLost = null;
+
+function loadSession() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SESSION_KEY) || "null");
+    if (saved?.token && saved.expiresAt > Date.now()) return saved;
+    localStorage.removeItem(SESSION_KEY);
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function saveSession(session) {
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  } catch {
+    return;
+  }
+}
+
+function clearSession() {
+  try {
+    localStorage.removeItem(SESSION_KEY);
+  } catch {
+    return;
+  }
+}
+
+function authHeaders() {
+  return authToken ? { Authorization: `Bearer ${authToken}` } : {};
 }
 
 function readSelected() {
@@ -198,9 +252,8 @@ function readSelected() {
 
 async function loadStations() {
   try {
-    const res = await fetch(`${API_BASE}/arg/stations/`, { cache: "no-store" });
-    if (!res.ok) return DEFAULT_STATIONS;
-    const json = await res.json();
+    const { res, json } = await requestJSON(`${API_BASE}/arg/stations/`);
+    if (!res.ok || !json) return DEFAULT_STATIONS;
     const list = (Array.isArray(json.stations) ? json.stations : [])
       .filter((s) => s && s.id)
       .map((s) => ({
@@ -215,14 +268,37 @@ async function loadStations() {
 }
 
 async function requestJSON(url) {
-  const res = await fetch(url, { cache: "no-store" });
+  const res = await fetch(url, { cache: "no-store", headers: authHeaders() });
   let json = null;
   try {
     json = await res.json();
   } catch {
     json = null;
   }
+  if (res.status === 401) {
+    onAuthLost?.(json?.error || "Your session has expired. Please sign in again.");
+    throw new Error("Session expired");
+  }
   return { res, json };
+}
+
+async function downloadMasterLog(station) {
+  const res = await fetch(`${API_BASE}/arg/${encodeURIComponent(station.id)}/history.csv`, {
+    cache: "no-store",
+    headers: authHeaders(),
+  });
+  if (res.status === 401) {
+    onAuthLost?.("Your session has expired. Please sign in again.");
+    return;
+  }
+  if (!res.ok) throw new Error(`Download failed (${res.status})`);
+  const blob = await res.blob();
+  const match = /filename="?([^"]+)"?/i.exec(res.headers.get("Content-Disposition") || "");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = match ? match[1] : `${station.id}_MASTER_LOG.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
 }
 
 async function fetchLatest(id) {
@@ -232,6 +308,23 @@ async function fetchLatest(id) {
   }
   if (!res.ok || !json?.success) throw new Error(json?.error || `API error: ${res.status}`);
   return json;
+}
+
+async function fetchHistory(id, hours) {
+  const { res, json } = await requestJSON(
+    `${API_BASE}/arg/${encodeURIComponent(id)}/history/?hours=${hours}&interval=${HISTORY_INTERVAL_MIN}`
+  );
+  if (!res.ok || !json?.success) throw new Error(json?.error || `History error: ${res.status}`);
+  return {
+    readings: (json.readings || []).map((r) => ({
+      t: r.t,
+      label: r.label,
+      rainfall: r.rainfall,
+      temperature: r.temperature,
+      humidity: r.humidity,
+    })),
+    summary: json.summary || {},
+  };
 }
 
 function classifyRain(mm) {
@@ -328,6 +421,236 @@ function StationPhoto() {
   );
 }
 
+const escapeHtml = (v) =>
+  String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+function StationMap({ items, selectedId }) {
+  const holder = useRef(null);
+  const mapRef = useRef(null);
+  const layerRef = useRef(null);
+  const fittedRef = useRef(false);
+
+  useEffect(() => {
+    fittedRef.current = false;
+    const map = L.map(holder.current, { scrollWheelZoom: false, zoomSnap: 0.5 }).setView(MAP_DEFAULT_CENTER, 11);
+    const street = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: "&copy; OpenStreetMap contributors",
+    });
+    const satellite = L.tileLayer(
+      "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+      { maxZoom: 19, attribution: "Imagery &copy; Esri" }
+    );
+    street.addTo(map);
+    L.control.layers({ Map: street, Satellite: satellite }, null, { position: "topright" }).addTo(map);
+    L.control.scale({ imperial: false }).addTo(map);
+    layerRef.current = L.layerGroup().addTo(map);
+    mapRef.current = map;
+    const resize = new ResizeObserver(() => map.invalidateSize());
+    resize.observe(holder.current);
+    return () => {
+      resize.disconnect();
+      map.remove();
+      mapRef.current = null;
+      layerRef.current = null;
+      fittedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const group = layerRef.current;
+    if (!map || !group) return;
+    group.clearLayers();
+    const points = [];
+
+    items.forEach((s) => {
+      if (!s.location) return;
+      const { lat, lng } = s.location;
+      points.push([lat, lng]);
+      const icon = L.divIcon({
+        className: "map-pin-wrap",
+        html: `<div class="map-pin ${s.status}${s.id === selectedId ? " sel" : ""}"><span></span></div>`,
+        iconSize: [34, 44],
+        iconAnchor: [17, 42],
+      });
+      const reading = s.status === "pending"
+        ? "Upcoming station"
+        : s.reading
+          ? `Rain ${fmt(s.reading.rainfall)} mm · ${fmt(s.reading.temperature)} °C · RH ${fmt(s.reading.humidity, 0)}%`
+          : "Awaiting data";
+      const marker = L.marker([lat, lng], { icon, title: `${s.name} – open in Google Maps`, riseOnHover: true });
+      marker.bindTooltip(
+        `<div class="map-tip"><strong>${escapeHtml(s.name)}</strong><span>${escapeHtml(s.id)}</span>` +
+          `<p>${escapeHtml(reading)}</p><em>Click to open in Google Maps</em></div>`,
+        { direction: "auto", offset: [0, -22], opacity: 1 }
+      );
+      marker.on("click", () => window.open(googleMapsUrl(s.location), "_blank", "noopener,noreferrer"));
+      group.addLayer(marker);
+    });
+
+    if (!fittedRef.current && points.length) {
+      if (points.length === 1) map.setView(points[0], 13);
+      else map.fitBounds(points, { padding: [60, 60], maxZoom: 13 });
+      fittedRef.current = true;
+    }
+  }, [items, selectedId]);
+
+  return <div ref={holder} className="station-map" role="region" aria-label="Map of rain gauge stations" />;
+}
+
+function LoginPage({ onLogin, notice }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [capsLock, setCapsLock] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(e) {
+    e.preventDefault();
+    if (!username.trim() || !password) {
+      setError("Enter your username and password.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch(`${API_BASE}/auth/login/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username.trim(), password }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        const left = json?.attemptsLeft;
+        setError(
+          (json?.error || `Sign-in failed (${res.status})`) +
+            (left != null && left <= 3 ? ` ${left} attempt${left === 1 ? "" : "s"} left.` : "")
+        );
+        setPassword("");
+        return;
+      }
+      onLogin({ token: json.token, user: json.user, expiresAt: json.expiresAt });
+    } catch {
+      setError("Unable to reach the server. Check your connection and try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const checkCaps = (e) => setCapsLock(Boolean(e.getModifierState?.("CapsLock")));
+
+  return (
+    <div className="login-page">
+      <div className="tricolor login-tricolor" aria-hidden="true"><span /><span /><span /></div>
+
+      <aside className="login-hero">
+        <div className="login-hero-bg" aria-hidden="true" />
+        <div className="login-hero-inner">
+          <div className="login-brand">
+            <div className="seal"><Logo id="ddma" fallback={<ShieldCheck size={34} />} /></div>
+            <div>
+              <span className="login-kicker"><Landmark size={13} /> Government of Kerala</span>
+              <strong>District Disaster Management Authority</strong>
+              <span className="ml">ജില്ലാ ദുരന്ത നിവാരണ അതോറിറ്റി · എറണാകുളം</span>
+            </div>
+          </div>
+
+          <div className="login-hero-copy">
+            <h1>Automatic Rain Gauge<br />Monitoring System</h1>
+            <p>Live rainfall, temperature and humidity from the upper Periyar catchment, for flood preparedness at Kalady.</p>
+            <ul>
+              <li><CloudRain size={16} /> Real-time observations every 15 minutes</li>
+              <li><ShieldCheck size={16} /> IMD-standard stations at Illithode and Kuttampuzha</li>
+              <li><Database size={16} /> Complete, continuous observation log</li>
+            </ul>
+          </div>
+
+          <div className="login-partners">
+            {Object.entries(LOGOS).map(([id, logo]) => (
+              <div className="login-partner" key={id} title={logo.name}>
+                <Logo id={id} fallback={<span>{logo.name}</span>} />
+              </div>
+            ))}
+          </div>
+        </div>
+      </aside>
+
+      <main className="login-panel">
+        <form className="login-card" onSubmit={submit} noValidate>
+          <div className="login-lock"><Lock size={22} /></div>
+          <h2>Secure sign in</h2>
+          <p className="login-sub">Authorised DDMA personnel only</p>
+
+          {notice && !error && (
+            <div className="login-alert info" role="status"><Info size={16} /> <span>{notice}</span></div>
+          )}
+          {error && (
+            <div className="login-alert" role="alert"><AlertTriangle size={16} /> <span>{error}</span></div>
+          )}
+
+          <label className="login-field">
+            <span>Username</span>
+            <div className="login-input">
+              <User size={17} />
+              <input
+                type="text"
+                autoComplete="username"
+                autoCapitalize="none"
+                spellCheck="false"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                disabled={busy}
+                autoFocus
+              />
+            </div>
+          </label>
+
+          <label className="login-field">
+            <span>Password</span>
+            <div className="login-input">
+              <KeyRound size={17} />
+              <input
+                type={showPassword ? "text" : "password"}
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                onKeyUp={checkCaps}
+                onKeyDown={checkCaps}
+                disabled={busy}
+              />
+              <button
+                type="button"
+                className="login-eye"
+                onClick={() => setShowPassword((v) => !v)}
+                aria-label={showPassword ? "Hide password" : "Show password"}
+              >
+                {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+              </button>
+            </div>
+            {capsLock && <small className="login-caps">Caps Lock is on</small>}
+          </label>
+
+          <button type="submit" className="login-submit" disabled={busy}>
+            {busy ? <RefreshCw size={17} className="spin" /> : <LogIn size={17} />}
+            {busy ? "Verifying…" : "Sign in"}
+          </button>
+
+          <p className="login-legal">
+            <ShieldCheck size={14} /> This is a restricted government system. Access is monitored and sessions
+            expire automatically after 12 hours.
+          </p>
+        </form>
+
+        <p className="login-credit">
+          Developed by Centre for AI-IoT Innovation · ASIET
+        </p>
+      </main>
+    </div>
+  );
+}
+
 function LiveClock() {
   const [now, setNow] = useState(new Date());
   useEffect(() => {
@@ -371,14 +694,59 @@ function ChartTooltip({ active, payload }) {
 }
 
 export default function App() {
+  const [session, setSession] = useState(() => {
+    const saved = loadSession();
+    authToken = saved?.token || null;
+    return saved;
+  });
+  const [notice, setNotice] = useState("");
+
+  const logout = useCallback((message = "") => {
+    authToken = null;
+    clearSession();
+    setSession(null);
+    setNotice(message);
+  }, []);
+
+  useEffect(() => {
+    onAuthLost = (message) => logout(message);
+    return () => {
+      onAuthLost = null;
+    };
+  }, [logout]);
+
+  useEffect(() => {
+    if (!session) return undefined;
+    const ms = session.expiresAt - Date.now();
+    if (ms <= 0) {
+      logout("Your session has expired. Please sign in again.");
+      return undefined;
+    }
+    const id = setTimeout(() => logout("Your session has expired. Please sign in again."), Math.min(ms, 2 ** 31 - 1));
+    return () => clearTimeout(id);
+  }, [session, logout]);
+
+  const login = (next) => {
+    authToken = next.token;
+    saveSession(next);
+    setNotice("");
+    setSession(next);
+  };
+
+  if (!session) return <LoginPage onLogin={login} notice={notice} />;
+  return <Dashboard key={session.token} session={session} onLogout={() => logout("You have been signed out.")} />;
+}
+
+function Dashboard({ session, onLogout }) {
   const [stations, setStations] = useState(DEFAULT_STATIONS);
   const [stationId, setStationId] = useState(() => readSelected() || DEFAULT_STATIONS[0].id);
   const [records, setRecords] = useState({});
-  const [histories, setHistories] = useState({});
+  const [historyState, setHistoryState] = useState({ key: "", readings: [], summary: {}, loading: true, error: "" });
   const [range, setRange] = useState("24h");
   const [tab, setTab] = useState("rainfall");
   const [page, setPage] = useState(0);
   const [fontScale, setFontScale] = useState(100);
+  const [logDownloading, setLogDownloading] = useState(false);
   const stationsRef = useRef(DEFAULT_STATIONS);
 
   const isMobile = useMediaQuery("(max-width: 640px)");
@@ -420,17 +788,6 @@ export default function App() {
       });
       return next;
     });
-
-    setHistories((prev) => {
-      const next = { ...prev };
-      results.forEach(([id, r]) => {
-        if (!r.json) return;
-        const merged = mergeHistory(prev[id] ?? loadHistory(id), extractReadings(r.json));
-        saveHistory(id, merged);
-        next[id] = merged;
-      });
-      return next;
-    });
   }, []);
 
   useEffect(() => {
@@ -454,20 +811,58 @@ export default function App() {
     };
   }, [refreshAll]);
 
+  useEffect(() => {
+    clearOldBrowserHistory();
+  }, []);
+
   const station = stations.find((s) => s.id === stationId) || stations[0];
   const isPending = station.status === "pending";
+  const rangeDef = RANGES.find((x) => x.id === range) || RANGES[1];
+  const historyKey = `${station.id}|${rangeDef.hours}`;
+
+  useEffect(() => {
+    if (isPending) {
+      setHistoryState({ key: historyKey, readings: [], summary: {}, loading: false, error: "" });
+      return undefined;
+    }
+    let alive = true;
+    const load = async (initial) => {
+      if (initial) setHistoryState((prev) => ({ ...prev, key: historyKey, loading: true, error: "" }));
+      try {
+        const { readings, summary } = await fetchHistory(station.id, rangeDef.hours);
+        if (alive) setHistoryState({ key: historyKey, readings, summary, loading: false, error: "" });
+      } catch (err) {
+        if (!alive) return;
+        const msg = err?.message === "Failed to fetch" ? "Unable to connect to the server" : err?.message;
+        setHistoryState((prev) => ({ ...prev, key: historyKey, loading: false, error: msg || "Unable to load history" }));
+      }
+    };
+    load(true);
+    const id = setInterval(() => load(false), REFRESH_MS);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [historyKey, station.id, rangeDef.hours, isPending]);
   const record = records[station.id] || {};
   const result = record.json || null;
   const error = record.error || "";
   const loading = !isPending && !record.checkedAt;
 
-  const history = useMemo(
-    () => histories[station.id] ?? loadHistory(station.id),
-    [histories, station.id]
-  );
-
   const latestRaw = getLatestRaw(result);
   const latest = toReading(latestRaw) || {};
+
+  const historyReady = historyState.key === historyKey;
+  const historyLoading = !historyReady || historyState.loading;
+  const historyError = historyReady ? historyState.error : "";
+
+  const history = useMemo(() => {
+    const rows = historyReady ? historyState.readings : [];
+    const last = rows[rows.length - 1];
+    const slotMs = HISTORY_INTERVAL_MIN * 60000;
+    const newSlot = latest.t && (!last || Math.floor(latest.t / slotMs) > Math.floor(last.t / slotMs));
+    return newSlot ? [...rows, latest] : rows;
+  }, [historyReady, historyState.readings, latest.t, latest.rainfall, latest.temperature, latest.humidity]);
 
   const category = classifyRain(latest.rainfall);
   const level = category?.level ?? "none";
@@ -475,20 +870,19 @@ export default function App() {
   const minutesOld = latest.t ? (Date.now() - latest.t) / 60000 : null;
   const isStale = minutesOld != null && minutesOld > STALE_MINUTES;
 
-  const filtered = useMemo(() => {
-    const r = RANGES.find((x) => x.id === range);
-    if (!r || r.ms === Infinity) return history;
-    const anchor = history.length ? history[history.length - 1].t ?? Date.now() : Date.now();
-    return history.filter((h) => h.t == null || h.t >= anchor - r.ms);
-  }, [history, range]);
+  const filtered = history;
 
-  const chartData = useMemo(() => filtered.map((r) => ({ ...r, x: r.t ?? r.label })), [filtered]);
+  const chartData = useMemo(
+    () => downsample(filtered, MAX_CHART_POINTS).map((r) => ({ ...r, x: r.t ?? r.label })),
+    [filtered]
+  );
 
-  const rangeMs = RANGES.find((x) => x.id === range)?.ms ?? Infinity;
+  const spanMs = filtered.length > 1 ? filtered[filtered.length - 1].t - filtered[0].t : 0;
   const tickFmt = (v) => {
     if (typeof v !== "number") return String(v).slice(-8);
-    return rangeMs <= 24 * 3600e3 ? timeFmt.format(new Date(v)) : dayFmt.format(new Date(v));
+    return spanMs <= 36 * 3600e3 ? timeFmt.format(new Date(v)) : dayFmt.format(new Date(v));
   };
+  const summary = historyState.summary || {};
 
   const sRain = stats(filtered, "rainfall");
   const sTemp = stats(filtered, "temperature");
@@ -504,6 +898,29 @@ export default function App() {
     const r = records[s.id];
     if (!r?.checkedAt) return "wait";
     return r.error ? "off" : "on";
+  };
+
+  const mapItems = useMemo(
+    () =>
+      stations.map((s) => ({
+        id: s.id,
+        name: s.name,
+        status: statusOf(s),
+        location: STATION_LOCATIONS[s.id] || null,
+        reading: toReading(getLatestRaw(records[s.id]?.json)),
+      })),
+    [stations, records]
+  );
+
+  const handleLogDownload = async () => {
+    setLogDownloading(true);
+    try {
+      await downloadMasterLog(station);
+    } catch (err) {
+      window.alert?.(err.message);
+    } finally {
+      setLogDownloading(false);
+    }
   };
 
   const selectStation = (id) => {
@@ -609,6 +1026,11 @@ export default function App() {
               <button onClick={() => setFontScale(100)} aria-label="Reset text size">A</button>
               <button onClick={() => setFontScale((s) => Math.min(125, s + 12.5))} aria-label="Increase text size">A+</button>
             </div>
+            <div className="user-chip">
+              <UserCircle2 size={15} />
+              <span className="hide-xs">{session.user?.name || session.user?.username}</span>
+              <button onClick={onLogout} aria-label="Sign out"><LogOut size={14} /><span className="hide-xs">Sign out</span></button>
+            </div>
           </div>
         </div>
       </div>
@@ -640,7 +1062,7 @@ export default function App() {
             <a href="#overview">Dashboard</a>
             <a href="#history">History</a>
             <a href="#records">Records</a>
-            <a href="#stations">Stations</a>
+            <a href="#map">Map</a>
             <a href="#about">About</a>
           </div>
         </div>
@@ -734,7 +1156,12 @@ export default function App() {
           <div className="section-head">
             <div>
               <h2>Historical Trends</h2>
-              <p>{station.name} · {filtered.length} observations in selected period</p>
+              <p>
+                {station.name} ·{" "}
+                {historyLoading
+                  ? "Loading master log…"
+                  : `${filtered.length.toLocaleString("en-IN")} observations · every ${HISTORY_INTERVAL_MIN} minutes`}
+              </p>
             </div>
             <div className="seg" role="tablist" aria-label="Time range">
               {RANGES.map((r) => (
@@ -763,11 +1190,16 @@ export default function App() {
           </div>
 
           <div className="chart-box" style={{ minHeight: chartHeight }}>
-            {chartData.length === 0 ? (
+            {historyLoading && chartData.length === 0 ? (
+              <div className="chart-empty" style={{ height: chartHeight }}>
+                <RefreshCw size={30} className="spin" />
+                <p>Loading observation history…</p>
+              </div>
+            ) : chartData.length === 0 ? (
               <div className="chart-empty" style={{ height: chartHeight }}>
                 <BarChart3 size={36} />
-                <p>No history available for this period yet.</p>
-                <span>Readings are recorded every {REFRESH_MS / 1000} seconds while this page is open.</span>
+                <p>{historyError ? "Unable to load history" : "No observations in this period"}</p>
+                <span>{historyError || (isPending ? "This station is not commissioned yet." : "Try a longer time range.")}</span>
               </div>
             ) : (
               <ResponsiveContainer width="100%" height={chartHeight}>{renderChart()}</ResponsiveContainer>
@@ -781,6 +1213,15 @@ export default function App() {
             <div><span>Avg. Humidity</span><strong>{fmt(sHum.avg, 0)} %</strong></div>
           </div>
 
+          {/* {summary.firstReading && (
+            <p className="history-source">
+              <Database size={13} /> Master log holds{" "}
+              <b>{Number(summary.totalReadings || 0).toLocaleString("en-IN")}</b> readings from{" "}
+              {shortFmt.format(new Date(summary.firstReading))} to {shortFmt.format(new Date(summary.lastReading))}.
+              Showing one reading every {HISTORY_INTERVAL_MIN} minutes.
+            </p>
+          )} */}
+
           <div className="legend-imd">
             <span><Info size={14} /> IMD 24-hr rainfall categories:</span>
             <span className="chip green">Light ≤ 15.5</span>
@@ -790,15 +1231,89 @@ export default function App() {
           </div>
         </section>
 
+        <section id="map" className="section card map-section">
+          <div className="section-head">
+            <div>
+              <h2><MapIcon size={20} /> Station Locations</h2>
+              <p>Upper Periyar catchment · Click a station to open it in Google Maps</p>
+            </div>
+          </div>
+
+          <div className="map-layout">
+            <StationMap items={mapItems} selectedId={station.id} />
+
+            <ul className="map-list">
+              {mapItems.map((s) => (
+                <li key={s.id} className={`map-item ${s.id === station.id ? "selected" : ""}`}>
+                  <a
+                    className="map-item-main"
+                    href={s.location ? googleMapsUrl(s.location) : undefined}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={`Open ${s.name} in Google Maps`}
+                  >
+                    <span className={`st-dot ${s.status}`} />
+                    <span className="map-item-text">
+                      <strong>{s.name}</strong>
+                      <small>
+                        {s.id}
+                        {s.location && ` · ${s.location.lat.toFixed(4)}°N, ${s.location.lng.toFixed(4)}°E`}
+                      </small>
+                    </span>
+                    <span className={`badge ${s.status}`}>
+                      {s.status === "pending" ? "Upcoming" : s.status === "off" ? "Offline" : s.status === "wait" ? "Connecting" : "Active"}
+                    </span>
+                  </a>
+
+                  {s.status !== "pending" && s.reading && (
+                    <div className="map-item-stats">
+                      <span><CloudRain size={13} /> {fmt(s.reading.rainfall)} mm</span>
+                      <span><Thermometer size={13} /> {fmt(s.reading.temperature)} °C</span>
+                      <span><Droplets size={13} /> {fmt(s.reading.humidity, 0)} %</span>
+                    </div>
+                  )}
+
+                  <div className="map-item-actions">
+                    {s.location && (
+                      <a href={googleMapsUrl(s.location)} target="_blank" rel="noopener noreferrer">
+                        <ExternalLink size={14} /> Google Maps
+                      </a>
+                    )}
+                    {s.location && (
+                      <a
+                        href={`https://www.google.com/maps/dir/?api=1&destination=${s.location.lat},${s.location.lng}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        <Navigation size={14} /> Directions
+                      </a>
+                    )}
+                    {s.status !== "pending" && s.id !== station.id && (
+                      <button onClick={() => selectStation(s.id)}>View data</button>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
+
         <section id="records" className="section card">
           <div className="section-head">
             <div>
               <h2><Table2 size={20} /> Observation Records</h2>
-              <p>{station.name} · Most recent first</p>
+              <p>{station.name} · Every {HISTORY_INTERVAL_MIN} minutes</p>
             </div>
-            <button className="btn-outline" onClick={() => downloadCSV(tableRows, station)} disabled={!tableRows.length}>
-              <Download size={16} /> Download CSV
-            </button>
+            <div className="records-actions">
+              <button className="btn-outline" onClick={() => downloadCSV(tableRows, station)} disabled={!tableRows.length}>
+                <Download size={16} /> This period
+              </button>
+              {!isPending && (
+                <button className="btn-solid" onClick={handleLogDownload} disabled={logDownloading}>
+                  {logDownloading ? <RefreshCw size={16} className="spin" /> : <FileDown size={16} />} Data Log
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="table-wrap">
@@ -814,7 +1329,11 @@ export default function App() {
               </thead>
               <tbody>
                 {pageRows.length === 0 ? (
-                  <tr className="empty-row"><td colSpan={5} className="empty">No records yet</td></tr>
+                  <tr className="empty-row">
+                    <td colSpan={5} className="empty">
+                      {historyLoading ? "Loading records…" : historyError || "No records in this period"}
+                    </td>
+                  </tr>
                 ) : (
                   pageRows.map((r, i) => {
                     const c = classifyRain(r.rainfall);
@@ -839,47 +1358,6 @@ export default function App() {
               <button onClick={() => setPage(safePage - 1)} disabled={safePage === 0} aria-label="Previous page"><ChevronLeft size={16} /></button>
               <button onClick={() => setPage(safePage + 1)} disabled={safePage >= pageCount - 1} aria-label="Next page"><ChevronRight size={16} /></button>
             </div>
-          </div>
-        </section>
-
-        <section id="stations" className="section card">
-          <h2><Radio size={20} /> Station Network</h2>
-          <div className="station-grid">
-            {stations.map((s) => {
-              const st = statusOf(s);
-              const r = toReading(getLatestRaw(records[s.id]?.json));
-              const c = classifyRain(r?.rainfall);
-              return (
-                <article key={s.id} className={`station-card ${s.id === station.id ? "selected" : ""}`}>
-                  <header>
-                    <span className={`st-dot ${st}`} />
-                    <div>
-                      <strong>{s.name}</strong>
-                      <small>{s.id}</small>
-                    </div>
-                    <span className={`badge ${st}`}>
-                      {st === "pending" ? "Upcoming" : st === "off" ? "Offline" : st === "wait" ? "Connecting" : "Active"}
-                    </span>
-                  </header>
-                  {s.status === "pending" ? (
-                    <p className="station-note"></p>
-                  ) : (
-                    <dl>
-                      <div><dt>Rainfall</dt><dd>{fmt(r?.rainfall)} mm</dd></div>
-                      <div><dt>Temp</dt><dd>{fmt(r?.temperature)} °C</dd></div>
-                      <div><dt>RH</dt><dd>{fmt(r?.humidity, 0)} %</dd></div>
-                    </dl>
-                  )}
-                  <footer>
-                    <span>{r?.t ? shortFmt.format(new Date(r.t)) : r?.label || "—"}</span>
-                    {c && s.status !== "pending" && <span className={`chip ${c.level}`}>{c.label}</span>}
-                  </footer>
-                  {s.status !== "pending" && s.id !== station.id && (
-                    <button className="btn-link" onClick={() => selectStation(s.id)}>View station →</button>
-                  )}
-                </article>
-              );
-            })}
           </div>
         </section>
 
