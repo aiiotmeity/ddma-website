@@ -62,6 +62,7 @@ const API_BASE = (
 const REFRESH_MS = 60_000;
 const STALE_MINUTES = 30;
 const PAGE_SIZE = 10;
+const MOBILE_PAGE_SIZE = 3;
 const HISTORY_INTERVAL_MIN = 30;
 const MAX_CHART_POINTS = 1500;
 const OLD_STORAGE_KEYS = ["ddma_arg_history_v1", "ddma_arg_history_v2_ARGS1", "ddma_arg_history_v2_ARGS2"];
@@ -750,6 +751,15 @@ function Dashboard({ session, onLogout }) {
   const stationsRef = useRef(DEFAULT_STATIONS);
 
   const isMobile = useMediaQuery("(max-width: 640px)");
+  const firstRender = useRef(true);
+
+  useEffect(() => {
+    if (firstRender.current) {
+      firstRender.current = false;
+      return;
+    }
+    setPage(0);
+  }, [isMobile]);
 
   useEffect(() => {
     document.documentElement.style.fontSize = `${fontScale}%`;
@@ -888,10 +898,11 @@ function Dashboard({ session, onLogout }) {
   const sTemp = stats(filtered, "temperature");
   const sHum = stats(filtered, "humidity");
 
+  const pageSize = isMobile ? MOBILE_PAGE_SIZE : PAGE_SIZE;
   const tableRows = [...filtered].reverse();
-  const pageCount = Math.max(1, Math.ceil(tableRows.length / PAGE_SIZE));
+  const pageCount = Math.max(1, Math.ceil(tableRows.length / pageSize));
   const safePage = Math.min(page, pageCount - 1);
-  const pageRows = tableRows.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
+  const pageRows = tableRows.slice(safePage * pageSize, safePage * pageSize + pageSize);
 
   const statusOf = (s) => {
     if (s.status === "pending") return "pending";
@@ -1353,7 +1364,16 @@ function Dashboard({ session, onLogout }) {
           </div>
 
           <div className="pager">
-            <span>Page {safePage + 1} of {pageCount}</span>
+            <span>
+              Page {safePage + 1} of {pageCount}
+              {tableRows.length > 0 && (
+                <small className="pager-range">
+                  {" · "}
+                  {safePage * pageSize + 1}–{Math.min(tableRows.length, (safePage + 1) * pageSize)} of{" "}
+                  {tableRows.length.toLocaleString("en-IN")}
+                </small>
+              )}
+            </span>
             <div>
               <button onClick={() => setPage(safePage - 1)} disabled={safePage === 0} aria-label="Previous page"><ChevronLeft size={16} /></button>
               <button onClick={() => setPage(safePage + 1)} disabled={safePage >= pageCount - 1} aria-label="Next page"><ChevronRight size={16} /></button>
