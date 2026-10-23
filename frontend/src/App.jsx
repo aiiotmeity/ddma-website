@@ -76,6 +76,27 @@ const STATION_LOCATIONS = {
 
 const MAP_DEFAULT_CENTER = [10.177, 76.633];
 
+const HOUR_MS = 3600e3;
+const DAY_MS = 86400e3;
+const IST_OFFSET_MS = 5.5 * HOUR_MS;
+
+const DL_UNITS = [
+  { id: "hour", label: "Hourly" },
+  { id: "day", label: "Daily" },
+  { id: "week", label: "Weekly" },
+  { id: "month", label: "Monthly" },
+  { id: "raw", label: "Every reading" },
+];
+
+const DL_PERIODS = [
+  { id: "24h", label: "Last 24 hours", hours: 24 },
+  { id: "7d", label: "Last 7 days", hours: 168 },
+  { id: "30d", label: "Last 30 days", hours: 720 },
+  { id: "90d", label: "Last 3 months", hours: 2160 },
+  { id: "1y", label: "Last 12 months", hours: 8760 },
+  { id: "all", label: "All data", hours: 0 },
+];
+
 const googleMapsUrl = ({ lat, lng }) => `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
 
 const DEFAULT_STATIONS = [
@@ -209,6 +230,106 @@ function downsample(rows, maxPoints) {
   return out;
 }
 
+function bucketStart(t, unit) {
+  const d = new Date(t + IST_OFFSET_MS);
+  if (unit === "hour") {
+    d.setUTCMinutes(0, 0, 0);
+  } else {
+    d.setUTCHours(0, 0, 0, 0);
+    if (unit === "week") d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
+    if (unit === "month") d.setUTCDate(1);
+  }
+  return d.getTime() - IST_OFFSET_MS;
+}
+
+function bucketEnd(start, unit) {
+  if (unit === "hour") return start + HOUR_MS;
+  if (unit === "day") return start + DAY_MS;
+  if (unit === "week") return start + 7 * DAY_MS;
+  const d = new Date(start + IST_OFFSET_MS);
+  d.setUTCMonth(d.getUTCMonth() + 1);
+  return d.getTime() - IST_OFFSET_MS;
+}
+
+function withIncrements(rows) {
+  let prev = null;
+  return rows.map((r) => {
+    let inc = null;
+    if (r.rainfall != null && prev) {
+      const diff = r.rainfall - prev.rainfall;
+      inc = diff >= -0.05 ? Math.max(diff, 0) : r.rainfall;
+    }
+    if (r.rainfall != null) prev = r;
+    return { ...r, inc };
+  });
+}
+
+const round1 = (v) => (v == null ? null : Math.round(v * 10) / 10);
+const mean = (vals) => (vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null);
+
+const dateFmtIN = new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Kolkata" });
+const monthFmtIN = new Intl.DateTimeFormat("en-IN", { month: "long", year: "numeric", timeZone: "Asia/Kolkata" });
+const hourFmtIN = new Intl.DateTimeFormat("en-IN", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Kolkata" });
+
+function periodLabel(b, unit) {
+  if (unit === "hour") return `${dateFmtIN.format(b.start)}, ${hourFmtIN.format(b.start)} – ${hourFmtIN.format(b.end)}`;
+  if (unit === "day") return dateFmtIN.format(b.start);
+  if (unit === "week") return `${dateFmtIN.format(b.start)} – ${dateFmtIN.format(b.end - DAY_MS)}`;
+  return monthFmtIN.format(b.start);
+}
+
+function aggregate(rows, unit, fromT = -Infinity, fill = false) {
+  const map = new Map();
+  withIncrements(rows).forEach((r) => {
+    if (r.t == null) return;
+    const start = bucketStart(r.t - 1, unit);
+    let b = map.get(start);
+    if (!b) {
+      b = { start, end: bucketEnd(start, unit), rain: null, temps: [], hums: [], count: 0 };
+      map.set(start, b);
+    }
+    if (r.inc != null) b.rain = (b.rain ?? 0) + r.inc;
+    if (r.temperature != null) b.temps.push(r.temperature);
+    if (r.humidity != null) b.hums.push(r.humidity);
+    b.count += 1;
+  });
+
+  let list = [...map.values()].filter((b) => b.end > fromT).sort((a, b) => a.start - b.start);
+
+  if (fill && list.length > 1 && (unit === "hour" || unit === "day")) {
+    const step = unit === "hour" ? HOUR_MS : DAY_MS;
+    const filled = [];
+    for (let t = list[0].start, i = 0; t <= list[list.length - 1].start; t += step) {
+      if (list[i]?.start === t) filled.push(list[i++]);
+      else filled.push({ start: t, end: t + step, rain: null, temps: [], hums: [], count: 0 });
+    }
+    list = filled;
+  }
+
+  return list.map((b) => ({
+    start: b.start,
+    end: b.end,
+    label: periodLabel(b, unit),
+    rain: round1(b.rain),
+    tMax: b.temps.length ? Math.max(...b.temps) : null,
+    tMin: b.temps.length ? Math.min(...b.temps) : null,
+    tAvg: round1(mean(b.temps)),
+    hAvg: round1(mean(b.hums)),
+    count: b.count,
+  }));
+}
+
+function saveCSV(filename, header, rows) {
+  const esc = (c) => `"${String(c ?? "").replace(/"/g, '""')}"`;
+  const text = [header.map(esc).join(","), ...rows.map((r) => r.map(esc).join(","))].join("\r\n");
+  const blob = new Blob(["\ufeff" + text], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
 let authToken = null;
 let onAuthLost = null;
 
@@ -311,9 +432,9 @@ async function fetchLatest(id) {
   return json;
 }
 
-async function fetchHistory(id, hours) {
+async function fetchHistory(id, hours, interval = HISTORY_INTERVAL_MIN) {
   const { res, json } = await requestJSON(
-    `${API_BASE}/arg/${encodeURIComponent(id)}/history/?hours=${hours}&interval=${HISTORY_INTERVAL_MIN}`
+    `${API_BASE}/arg/${encodeURIComponent(id)}/history/?hours=${hours}&interval=${interval}`
   );
   if (!res.ok || !json?.success) throw new Error(json?.error || `History error: ${res.status}`);
   return {
@@ -355,21 +476,6 @@ function stats(list, key) {
   };
 }
 
-function downloadCSV(rows, station) {
-  const header = ["Station", "Timestamp", "Rainfall (mm)", "Temperature (°C)", "Humidity (%)"];
-  const lines = rows.map((r) =>
-    [station.id, fmtTime(r.t, r.label), r.rainfall ?? "", r.temperature ?? "", r.humidity ?? ""]
-      .map((c) => `"${String(c).replace(/"/g, '""')}"`)
-      .join(",")
-  );
-  const blob = new Blob([[header.join(","), ...lines].join("\n")], { type: "text/csv" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `${station.id}_history_${new Date().toISOString().slice(0, 10)}.csv`;
-  a.click();
-  URL.revokeObjectURL(a.href);
-}
-
 function useMediaQuery(query) {
   const [matches, setMatches] = useState(() => typeof window !== "undefined" && window.matchMedia(query).matches);
   useEffect(() => {
@@ -384,9 +490,9 @@ function useMediaQuery(query) {
 
 const LOGOS = {
   ddma: { src: "/logos/ddma.png", name: "DDMA" },
-  imd: { src: "/logos/imd.png", name: "IMD" },
-  forest: { src: "/logos/forest.png", name: "Kerala Forest Department" },
-  asiet: { src: "/logos/asiet.png", name: "ASIET" },
+  imd: { src: "/images/imd.jpg", name: "IMD" },
+  forest: { src: "/images/forest.jpg", name: "Kerala Forest Department" },
+  asiet: { src: "/images/asiet.jpg", name: "ASIET" },
 };
 
 function Logo({ id, fallback }) {
@@ -683,7 +789,7 @@ function ChartTooltip({ active, payload }) {
   const r = payload[0].payload;
   return (
     <div className="chart-tip">
-      <strong>{fmtTime(r.t, r.label)}</strong>
+      <strong>{r.rangeLabel || fmtTime(r.t, r.label)}</strong>
       {payload.map((p) => (
         <div key={p.dataKey}>
           <i style={{ background: p.color }} />
@@ -748,6 +854,10 @@ function Dashboard({ session, onLogout }) {
   const [page, setPage] = useState(0);
   const [fontScale, setFontScale] = useState(100);
   const [logDownloading, setLogDownloading] = useState(false);
+  const [dlUnit, setDlUnit] = useState("day");
+  const [dlPeriod, setDlPeriod] = useState("30d");
+  const [dlBusy, setDlBusy] = useState(false);
+  const [dlError, setDlError] = useState("");
   const stationsRef = useRef(DEFAULT_STATIONS);
 
   const isMobile = useMediaQuery("(max-width: 640px)");
@@ -839,7 +949,7 @@ function Dashboard({ session, onLogout }) {
     const load = async (initial) => {
       if (initial) setHistoryState((prev) => ({ ...prev, key: historyKey, loading: true, error: "" }));
       try {
-        const { readings, summary } = await fetchHistory(station.id, rangeDef.hours);
+        const { readings, summary } = await fetchHistory(station.id, rangeDef.hours + 1);
         if (alive) setHistoryState({ key: historyKey, readings, summary, loading: false, error: "" });
       } catch (err) {
         if (!alive) return;
@@ -880,12 +990,32 @@ function Dashboard({ session, onLogout }) {
   const minutesOld = latest.t ? (Date.now() - latest.t) / 60000 : null;
   const isStale = minutesOld != null && minutesOld > STALE_MINUTES;
 
-  const filtered = history;
+  const lastT = history.length ? history[history.length - 1].t : null;
+  const fromT = lastT != null ? lastT - rangeDef.hours * HOUR_MS : -Infinity;
+  const filtered = useMemo(() => history.filter((r) => r.t == null || r.t >= fromT), [history, fromT]);
 
   const chartData = useMemo(
     () => downsample(filtered, MAX_CHART_POINTS).map((r) => ({ ...r, x: r.t ?? r.label })),
     [filtered]
   );
+
+  const rainUnit = rangeDef.hours > 168 ? "day" : "hour";
+  const hourly = useMemo(() => aggregate(history, "hour", fromT), [history, fromT]);
+  const rainBuckets = useMemo(
+    () =>
+      aggregate(history, rainUnit, fromT, true).map((b) => ({
+        x: b.start,
+        t: b.start,
+        rangeLabel: b.label,
+        rain: b.rain,
+        temperature: b.tAvg,
+        humidity: b.hAvg,
+      })),
+    [history, rainUnit, fromT]
+  );
+  const totalRain = hourly.reduce((sum, b) => sum + (b.rain ?? 0), 0);
+  const wettest = hourly.reduce((best, b) => (b.rain != null && (!best || b.rain > best.rain) ? b : best), null);
+  const lastHourRain = hourly.length ? hourly[hourly.length - 1].rain : null;
 
   const spanMs = filtered.length > 1 ? filtered[filtered.length - 1].t - filtered[0].t : 0;
   const tickFmt = (v) => {
@@ -894,12 +1024,12 @@ function Dashboard({ session, onLogout }) {
   };
   const summary = historyState.summary || {};
 
-  const sRain = stats(filtered, "rainfall");
   const sTemp = stats(filtered, "temperature");
   const sHum = stats(filtered, "humidity");
 
   const pageSize = isMobile ? MOBILE_PAGE_SIZE : PAGE_SIZE;
-  const tableRows = [...filtered].reverse();
+  const completedHours = hourly.filter((b) => lastT != null && b.end <= lastT);
+  const tableRows = [...completedHours].reverse();
   const pageCount = Math.max(1, Math.ceil(tableRows.length / pageSize));
   const safePage = Math.min(page, pageCount - 1);
   const pageRows = tableRows.slice(safePage * pageSize, safePage * pageSize + pageSize);
@@ -934,11 +1064,53 @@ function Dashboard({ session, onLogout }) {
     }
   };
 
+  const handleSummaryDownload = async () => {
+    const period = DL_PERIODS.find((p) => p.id === dlPeriod) || DL_PERIODS[1];
+    const unit = DL_UNITS.find((u) => u.id === dlUnit) || DL_UNITS[0];
+    setDlBusy(true);
+    setDlError("");
+    try {
+      const { readings } = await fetchHistory(station.id, period.hours ? period.hours + 24 : 0, 0);
+      const last = readings.length ? readings[readings.length - 1].t : null;
+      const from = period.hours && last != null ? last - period.hours * HOUR_MS : -Infinity;
+      const stamp = new Date().toISOString().slice(0, 10);
+      const name = `${station.id}_${unit.label.toLowerCase().replace(/\s+/g, "-")}_${period.id}_${stamp}.csv`;
+
+      if (unit.id === "raw") {
+        const rows = withIncrements(readings)
+          .filter((r) => r.t != null && r.t >= from)
+          .map((r) => [station.id, fmtTime(r.t, r.label), r.rainfall ?? "", round1(r.inc) ?? "", r.temperature ?? "", r.humidity ?? ""]);
+        if (!rows.length) throw new Error("No readings in this period.");
+        saveCSV(name, ["Station", "Date & Time (IST)", "Accumulated rainfall (mm)", "Rain since previous reading (mm)", "Temperature (°C)", "Humidity (%)"], rows);
+      } else {
+        const rows = aggregate(readings, unit.id, from).map((b) => [
+          station.id,
+          b.label,
+          fmtTime(b.start),
+          fmtTime(b.end),
+          b.rain ?? "",
+          b.tMax ?? "",
+          b.tMin ?? "",
+          b.tAvg ?? "",
+          b.hAvg ?? "",
+          b.count,
+        ]);
+        if (!rows.length) throw new Error("No readings in this period.");
+        saveCSV(name, ["Station", "Period", "From (IST)", "To (IST)", "Rainfall (mm)", "Max temp (°C)", "Min temp (°C)", "Avg temp (°C)", "Avg humidity (%)", "Readings"], rows);
+      }
+    } catch (err) {
+      if (err?.message !== "Session expired") setDlError(err?.message || "Download failed.");
+    } finally {
+      setDlBusy(false);
+    }
+  };
+
   const selectStation = (id) => {
     setStationId(id);
     setPage(0);
   };
 
+  const activeChartData = tab === "rainfall" || tab === "combined" ? rainBuckets : chartData;
   const chartHeight = isMobile ? 260 : 360;
   const tickSize = isMobile ? 10 : 12;
   const margin = isMobile ? { top: 8, right: 4, left: -8, bottom: 0 } : { top: 10, right: 16, left: 0, bottom: 0 };
@@ -957,17 +1129,33 @@ function Dashboard({ session, onLogout }) {
       <Brush dataKey="x" height={24} stroke={C.primary} tickFormatter={tickFmt} travellerWidth={8} />
     );
 
+    const rainBrush = !isMobile && rainBuckets.length > 30 && (
+      <Brush dataKey="x" height={24} stroke={C.primary} tickFormatter={tickFmt} travellerWidth={8} />
+    );
+    const RAIN_TICK_MM = 10;
+    const rainMax = Math.max(0, ...rainBuckets.map((b) => b.rain ?? 0));
+    const rainTop = Math.max(RAIN_TICK_MM, Math.ceil((rainMax * 1.05) / RAIN_TICK_MM) * RAIN_TICK_MM);
+    const rainDomain = [0, rainTop];
+    const rainTicks = Array.from({ length: rainTop / RAIN_TICK_MM + 1 }, (_, i) => i * RAIN_TICK_MM);
+
     if (tab === "rainfall")
       return (
-        <BarChart data={chartData} margin={margin}>
+        <BarChart data={rainBuckets} margin={margin}>
           <CartesianGrid strokeDasharray="3 3" stroke={C.grid} vertical={false} />
           <XAxis {...axisProps} />
-          <YAxis {...yProps} width={isMobile ? 40 : 60} unit={isMobile ? "" : " mm"} />
-          <Tooltip content={<ChartTooltip />} />
-          <ReferenceLine y={64.5} stroke={C.orange} strokeDasharray="5 4" label={{ value: isMobile ? "Heavy" : "Heavy (64.5 mm)", fill: C.orange, fontSize: 11, position: "insideTopRight" }} />
-          <ReferenceLine y={115.6} stroke={C.red} strokeDasharray="5 4" label={{ value: isMobile ? "V. Heavy" : "Very Heavy (115.6 mm)", fill: C.red, fontSize: 11, position: "insideTopRight" }} />
-          <Bar dataKey="rainfall" name="Rainfall (mm)" fill={C.rain} radius={[4, 4, 0, 0]} maxBarSize={28} />
-          {brush}
+          <YAxis {...yProps} width={isMobile ? 40 : 60} unit={isMobile ? "" : " mm"} domain={rainDomain} ticks={rainTicks} interval={0} />
+          <Tooltip content={<ChartTooltip />} cursor={{ fill: "rgba(11, 60, 122, 0.07)" }} />
+          {rainUnit === "day" && (
+            <ReferenceLine y={64.5} stroke={C.orange} strokeDasharray="5 4" label={{ value: isMobile ? "Heavy" : "Heavy (64.5 mm/day)", fill: C.orange, fontSize: 11, position: "insideTopRight" }} />
+          )}
+          <Bar
+            dataKey="rain"
+            name={rainUnit === "hour" ? "Rain in hour (mm)" : "Rain in day (mm)"}
+            fill={C.rain}
+            radius={[3, 3, 0, 0]}
+            maxBarSize={22}
+          />
+          {rainBrush}
         </BarChart>
       );
 
@@ -983,7 +1171,7 @@ function Dashboard({ session, onLogout }) {
           <CartesianGrid strokeDasharray="3 3" stroke={C.grid} vertical={false} />
           <XAxis {...axisProps} />
           <YAxis {...yProps} unit="°" domain={["dataMin - 1", "dataMax + 1"]} />
-          <Tooltip content={<ChartTooltip />} />
+          <Tooltip content={<ChartTooltip />} cursor={{ fill: "rgba(11, 60, 122, 0.07)" }} />
           <Area type="monotone" dataKey="temperature" name="Temperature (°C)" stroke={C.temp} strokeWidth={2.5} fill="url(#gTemp)" dot={false} activeDot={{ r: 5 }} />
           {brush}
         </ComposedChart>
@@ -1001,24 +1189,24 @@ function Dashboard({ session, onLogout }) {
           <CartesianGrid strokeDasharray="3 3" stroke={C.grid} vertical={false} />
           <XAxis {...axisProps} />
           <YAxis {...yProps} unit="%" domain={[0, 100]} />
-          <Tooltip content={<ChartTooltip />} />
+          <Tooltip content={<ChartTooltip />} cursor={{ fill: "rgba(11, 60, 122, 0.07)" }} />
           <Area type="monotone" dataKey="humidity" name="Humidity (%)" stroke={C.hum} strokeWidth={2.5} fill="url(#gHum)" dot={false} activeDot={{ r: 5 }} />
           {brush}
         </ComposedChart>
       );
 
     return (
-      <ComposedChart data={chartData} margin={margin}>
+      <ComposedChart data={rainBuckets} margin={margin}>
         <CartesianGrid strokeDasharray="3 3" stroke={C.grid} vertical={false} />
         <XAxis {...axisProps} />
-        <YAxis yAxisId="rain" {...yProps} width={isMobile ? 40 : 60} unit={isMobile ? "" : " mm"} />
+        <YAxis yAxisId="rain" {...yProps} width={isMobile ? 40 : 60} unit={isMobile ? "" : " mm"} domain={rainDomain} ticks={rainTicks} interval={0} />
         <YAxis yAxisId="pct" orientation="right" {...yProps} width={isMobile ? 30 : 44} domain={[0, 100]} />
-        <Tooltip content={<ChartTooltip />} />
+        <Tooltip content={<ChartTooltip />} cursor={{ fill: "rgba(11, 60, 122, 0.07)" }} />
         <Legend wrapperStyle={{ fontSize: isMobile ? 11 : 13 }} />
-        <Bar yAxisId="rain" dataKey="rainfall" name="Rainfall (mm)" fill={C.rain} radius={[4, 4, 0, 0]} maxBarSize={24} />
-        <Line yAxisId="pct" type="monotone" dataKey="temperature" name="Temp (°C)" stroke={C.temp} strokeWidth={2} dot={false} />
-        <Line yAxisId="pct" type="monotone" dataKey="humidity" name="RH (%)" stroke={C.hum} strokeWidth={2} dot={false} />
-        {brush}
+        <Bar yAxisId="rain" dataKey="rain" name={rainUnit === "hour" ? "Rain in hour (mm)" : "Rain in day (mm)"} fill={C.rain} radius={[3, 3, 0, 0]} maxBarSize={22} />
+        <Line yAxisId="pct" type="monotone" dataKey="temperature" name="Avg temp (°C)" stroke={C.temp} strokeWidth={2} dot={false} connectNulls />
+        <Line yAxisId="pct" type="monotone" dataKey="humidity" name="Avg RH (%)" stroke={C.hum} strokeWidth={2} dot={false} connectNulls />
+        {rainBrush}
       </ComposedChart>
     );
   }
@@ -1057,13 +1245,13 @@ function Dashboard({ session, onLogout }) {
               <p className="sub">Ernakulam · Automatic Rain Gauge Monitoring System</p>
             </div>
           </div>
-          <a className="helpline" href="tel:1077">
+          {/* <a className="helpline" href="tel:1077">
             <Phone size={18} />
             <div>
               <span>Emergency Helpline</span>
               <strong>1077 · 112</strong>
             </div>
-          </a>
+          </a> */}
         </div>
       </header>
 
@@ -1156,7 +1344,14 @@ function Dashboard({ session, onLogout }) {
             </div>
           ) : (
             <div className="kpi-grid">
-              <KpiCard title="Rainfall" value={fmt(latest.rainfall)} unit="mm" icon={CloudRain} accent="rain" sub={category?.label ?? "IMD category"} />
+              <KpiCard
+                title="Accumulated Rainfall"
+                value={fmt(latest.rainfall)}
+                unit="mm"
+                icon={CloudRain}
+                accent="rain"
+                sub={`${category?.label ?? "IMD category"}${lastHourRain != null ? ` · ${fmt(lastHourRain)} mm in last hour` : ""}`}
+              />
               <KpiCard title="Temperature" value={fmt(latest.temperature)} unit="°C" icon={Thermometer} accent="temp" sub="Air temperature" />
               <KpiCard title="Relative Humidity" value={fmt(latest.humidity, 0)} unit="%" icon={Droplets} accent="hum" sub="Ambient RH" />
             </div>
@@ -1171,7 +1366,7 @@ function Dashboard({ session, onLogout }) {
                 {station.name} ·{" "}
                 {historyLoading
                   ? "Loading master log…"
-                  : `${filtered.length.toLocaleString("en-IN")} observations · every ${HISTORY_INTERVAL_MIN} minutes`}
+                  : `${filtered.length.toLocaleString("en-IN")} observations · ${rainUnit === "hour" ? "hourly" : "daily"} rainfall`}
               </p>
             </div>
             <div className="seg" role="tablist" aria-label="Time range">
@@ -1201,12 +1396,12 @@ function Dashboard({ session, onLogout }) {
           </div>
 
           <div className="chart-box" style={{ minHeight: chartHeight }}>
-            {historyLoading && chartData.length === 0 ? (
+            {historyLoading && activeChartData.length === 0 ? (
               <div className="chart-empty" style={{ height: chartHeight }}>
                 <RefreshCw size={30} className="spin" />
                 <p>Loading observation history…</p>
               </div>
-            ) : chartData.length === 0 ? (
+            ) : activeChartData.length === 0 ? (
               <div className="chart-empty" style={{ height: chartHeight }}>
                 <BarChart3 size={36} />
                 <p>{historyError ? "Unable to load history" : "No observations in this period"}</p>
@@ -1218,7 +1413,12 @@ function Dashboard({ session, onLogout }) {
           </div>
 
           <div className="stat-row">
-            <div><span>Rainfall</span><strong>{fmt(sRain.max)} mm</strong></div>
+            <div><span>Total Rainfall</span><strong>{fmt(totalRain)} mm</strong></div>
+            {/* <div>
+              <span>Wettest Hour</span>
+              <strong>{wettest && wettest.rain > 0 ? `${fmt(wettest.rain)} mm` : "—"}</strong>
+              {wettest && wettest.rain > 0 && <small className="stat-note">{hourFmtIN.format(wettest.start)}, {dayFmt.format(wettest.start)}</small>}
+            </div> */}
             <div><span>Temp. Max / Min</span><strong>{fmt(sTemp.max)}° / {fmt(sTemp.min)}°</strong></div>
             <div><span>Avg. Temperature</span><strong>{fmt(sTemp.avg)} °C</strong></div>
             <div><span>Avg. Humidity</span><strong>{fmt(sHum.avg, 0)} %</strong></div>
@@ -1313,51 +1513,63 @@ function Dashboard({ session, onLogout }) {
           <div className="section-head">
             <div>
               <h2><Table2 size={20} /> Observation Records</h2>
-              <p>{station.name} · Every {HISTORY_INTERVAL_MIN} minutes</p>
-            </div>
-            <div className="records-actions">
-              <button className="btn-outline" onClick={() => downloadCSV(tableRows, station)} disabled={!tableRows.length}>
-                <Download size={16} /> This period
-              </button>
-              {!isPending && (
-                <button className="btn-solid" onClick={handleLogDownload} disabled={logDownloading}>
-                  {logDownloading ? <RefreshCw size={16} className="spin" /> : <FileDown size={16} />} Data Log
-                </button>
-              )}
+              <p>{station.name} · Hourly rainfall · Most recent first</p>
             </div>
           </div>
+
+          {!isPending && (
+            <div className="dl-panel">
+              <div className="dl-title"><Download size={16} /> Download data</div>
+              {/* <label className="dl-field">
+                <span>Summary</span>
+                <select value={dlUnit} onChange={(e) => setDlUnit(e.target.value)} disabled={dlBusy}>
+                  {DL_UNITS.map((u) => <option key={u.id} value={u.id}>{u.label}</option>)}
+                </select>
+              </label> */}
+              <label className="dl-field">
+                <span>Period</span>
+                <select value={dlPeriod} onChange={(e) => setDlPeriod(e.target.value)} disabled={dlBusy}>
+                  {DL_PERIODS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+                </select>
+              </label>
+              <div className="dl-actions">
+                <button className="btn-solid" onClick={handleSummaryDownload} disabled={dlBusy}>
+                  {dlBusy ? <RefreshCw size={16} className="spin" /> : <FileDown size={16} />} Download CSV
+                </button>
+                <button className="btn-outline" onClick={handleLogDownload} disabled={logDownloading} title="Original master log from the station">
+                  {logDownloading ? <RefreshCw size={16} className="spin" /> : <Database size={16} />} Full log
+                </button>
+              </div>
+              {dlError && <p className="dl-error"><AlertTriangle size={14} /> {dlError}</p>}
+            </div>
+          )}
 
           <div className="table-wrap">
             <table className="data-table">
               <thead>
                 <tr>
-                  <th>Date &amp; Time (IST)</th>
-                  <th>Rainfall (mm)</th>
-                  <th>Temp (°C)</th>
-                  <th>RH (%)</th>
-                  <th>Category</th>
+                  <th>Hour (IST)</th>
+                  <th>Rain in hour (mm)</th>
+                  <th>Avg Temp (°C)</th>
+                  <th>Avg RH (%)</th>
                 </tr>
               </thead>
               <tbody>
                 {pageRows.length === 0 ? (
                   <tr className="empty-row">
-                    <td colSpan={5} className="empty">
+                    <td colSpan={4} className="empty">
                       {historyLoading ? "Loading records…" : historyError || "No records in this period"}
                     </td>
                   </tr>
                 ) : (
-                  pageRows.map((r, i) => {
-                    const c = classifyRain(r.rainfall);
-                    return (
-                      <tr key={`${r.t ?? r.label}-${i}`}>
-                        <td data-label="Date & Time" className="when">{fmtTime(r.t, r.label)}</td>
-                        <td data-label="Rainfall (mm)" className="num">{fmt(r.rainfall)}</td>
-                        <td data-label="Temp (°C)" className="num">{fmt(r.temperature)}</td>
-                        <td data-label="RH (%)" className="num">{fmt(r.humidity, 0)}</td>
-                        <td data-label="Category">{c ? <span className={`chip ${c.level}`}>{c.label}</span> : "—"}</td>
-                      </tr>
-                    );
-                  })
+                  pageRows.map((r) => (
+                    <tr key={r.start}>
+                      <td data-label="Hour" className="when">{r.label}</td>
+                      <td data-label="Rain in hour (mm)" className={`num ${r.rain > 0 ? "rain-yes" : ""}`}>{fmt(r.rain)}</td>
+                      <td data-label="Avg Temp (°C)" className="num">{fmt(r.tAvg)}</td>
+                      <td data-label="Avg RH (%)" className="num">{fmt(r.hAvg, 0)}</td>
+                    </tr>
+                  ))
                 )}
               </tbody>
             </table>
