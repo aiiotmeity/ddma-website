@@ -489,7 +489,7 @@ function useMediaQuery(query) {
 }
 
 const LOGOS = {
-  ddma: { src: "/logos/ddma.png", name: "DDMA" },
+  ddma: { src: "/images/ddma.jpeg", name: "DDMA" },
   imd: { src: "/images/imd.jpg", name: "IMD" },
   forest: { src: "/images/forest.jpg", name: "Kerala Forest Department" },
   asiet: { src: "/images/asiet.jpg", name: "ASIET" },
