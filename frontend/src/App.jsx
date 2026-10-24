@@ -36,6 +36,7 @@ import {
   CloudSun,
   Trees,
   Cpu,
+  FlaskConical,
   Camera,
   Database,
   FileDown,
@@ -493,6 +494,7 @@ const LOGOS = {
   imd: { src: "/images/imd.jpg", name: "IMD" },
   forest: { src: "/images/forest.jpg", name: "Kerala Forest Department" },
   asiet: { src: "/images/asiet.jpg", name: "ASIET" },
+  cmet: { src: "/images/cmet.jpg", name: "C-MET Thrissur" },
 };
 
 function Logo({ id, fallback }) {
@@ -1654,6 +1656,16 @@ function Dashboard({ session, onLogout }) {
               <p>
                 The <strong>Centre for AI-IoT Innovation</strong> designed and built the sensor network,
                 the cloud data pipeline and this live monitoring dashboard.
+              </p>
+            </article>
+
+            <article className="partner partner-cmet">
+              <div className="partner-icon"><Logo id="cmet" fallback={<FlaskConical size={22} />} /></div>
+              <span className="partner-role">Technical Association</span>
+              <h4>Centre for Materials for Electronics Technology (C-MET), Thrissur</h4>
+              <p>
+                An autonomous scientific society under the Ministry of Electronics and Information Technology,
+                Government of India, associated with the initiative as a technical partner.
               </p>
             </article>
           </div>

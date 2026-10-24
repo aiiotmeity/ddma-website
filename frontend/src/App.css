@@ -545,6 +545,15 @@ main { padding-top: 18px; padding-bottom: 40px; }
 .partner-imd { --pc: #1f6feb; }
 .partner-forest { --pc: #2b8a3e; }
 .partner-asiet { --pc: #c2410c; }
+.partner-cmet { --pc: #6d28d9; grid-column: 1 / -1; }
+
+@media (min-width: 641px) {
+  .partner-cmet {
+    display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 18px; row-gap: 4px; align-items: start;
+  }
+  .partner-cmet .partner-icon { grid-row: 1 / span 3; margin-bottom: 0; }
+  .partner-cmet p { max-width: 820px; }
+}
 .partner-icon {
   width: 44px; height: 44px; border-radius: 10px; display: grid; place-items: center; flex-shrink: 0;
   color: var(--pc); background: color-mix(in srgb, var(--pc) 12%, white); margin-bottom: 6px;
