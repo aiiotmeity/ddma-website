@@ -706,3 +706,63 @@ main { padding-top: 18px; padding-bottom: 40px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; scroll-behavior: auto !important; }
 }
+.login-row { display: flex; justify-content: flex-end; margin-top: -8px; }
+.login-link {
+  display: inline-flex; align-items: center; gap: 6px; background: none; border: 0; padding: 2px 0;
+  color: var(--primary); font-weight: 600; font-size: 0.85rem;
+}
+.login-link:hover:not(:disabled) { text-decoration: underline; }
+.login-link.center { align-self: center; }
+.login-alert.success { background: #e6f6e9; border-color: #b7e4c0; color: #146c2e; }
+.login-wait { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--muted); font-size: 0.9rem; }
+
+.pw-rules {
+  list-style: none; margin: -4px 0 0; padding: 0;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 12px;
+  font-size: 0.8rem; color: var(--muted);
+}
+.pw-rules li { display: flex; align-items: center; gap: 6px; }
+.pw-rules li svg { flex-shrink: 0; }
+.pw-rules li.ok { color: #146c2e; font-weight: 600; }
+
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 200; display: grid; place-items: center; padding: 16px; overflow-y: auto;
+  background: rgba(7, 26, 51, .55); backdrop-filter: blur(2px);
+}
+.modal-card {
+  position: relative; width: 100%; max-width: 440px; background: #fff; color: var(--text); border-radius: 16px;
+  padding: clamp(22px, 4vw, 32px); box-shadow: 0 24px 60px rgba(7, 42, 87, .3);
+  display: flex; flex-direction: column; gap: 14px;
+}
+.modal-card h2 { font-size: 1.35rem; color: var(--primary); font-weight: 700; }
+.modal-form { display: flex; flex-direction: column; gap: 14px; }
+.modal-sub { margin: -6px 0 0; color: var(--muted); font-size: 0.88rem; }
+.modal-close {
+  position: absolute; top: 12px; right: 12px; width: 36px; height: 36px; display: grid; place-items: center;
+  border: 0; border-radius: 8px; background: var(--bg); color: var(--muted);
+}
+.modal-close:hover:not(:disabled) { color: var(--primary); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
+
+@media (max-width: 420px) {
+  .pw-rules { grid-template-columns: 1fr; }
+  .modal-actions > * { flex: 1; }
+}
+
+@media print {
+  .modal-backdrop { display: none !important; }
+}
+
+.user-chip span, .user-chip button { white-space: nowrap; }
+
+@media (max-width: 1024px) {
+  .user-chip > .hide-xs { display: none; }
+}
+
+@media (max-width: 640px) {
+  .user-chip .hide-xs { display: none; }
+  .user-chip button { padding: 3px 8px; }
+}
+
+.login-input input.login-key { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: .04em; text-transform: uppercase; }
+.login-input input.login-key::placeholder { color: #a7b1bf; text-transform: none; }

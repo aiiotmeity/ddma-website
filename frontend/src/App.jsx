@@ -52,6 +52,11 @@ import {
   Navigation,
   KeyRound,
   UserCircle2,
+  CheckCircle2,
+  Circle,
+  Mail,
+  ArrowLeft,
+  X,
 } from "lucide-react";
 import "./App.css";
 
@@ -365,6 +370,16 @@ function authHeaders() {
   return authToken ? { Authorization: `Bearer ${authToken}` } : {};
 }
 
+async function postJSON(path, body, withAuth = false) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(withAuth ? authHeaders() : {}) },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json().catch(() => null);
+  return { res, json };
+}
+
 function readSelected() {
   try {
     return localStorage.getItem(SELECTED_KEY);
@@ -608,39 +623,244 @@ function StationMap({ items, selectedId }) {
   return <div ref={holder} className="station-map" role="region" aria-label="Map of rain gauge stations" />;
 }
 
+const MIN_PASSWORD_LENGTH = 10;
+
+function passwordChecks(pw, confirm) {
+  return [
+    { ok: pw.length >= MIN_PASSWORD_LENGTH, text: `At least ${MIN_PASSWORD_LENGTH} characters` },
+    { ok: /[A-Za-z]/.test(pw) && /\d/.test(pw), text: "Letters and numbers" },
+    { ok: pw.length > 0 && pw === pw.trim(), text: "No space at start or end" },
+    { ok: pw.length > 0 && pw === confirm, text: "Both entries match" },
+  ];
+}
+
+function PasswordRules({ checks }) {
+  return (
+    <ul className="pw-rules" aria-label="Password rules">
+      {checks.map((c) => (
+        <li key={c.text} className={c.ok ? "ok" : ""}>
+          {c.ok ? <CheckCircle2 size={14} /> : <Circle size={14} />} {c.text}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function PasswordInput({ label, value, onChange, autoComplete, disabled, autoFocus }) {
+  const [show, setShow] = useState(false);
+  const [caps, setCaps] = useState(false);
+  const checkCaps = (e) => setCaps(Boolean(e.getModifierState?.("CapsLock")));
+
+  return (
+    <label className="login-field">
+      <span>{label}</span>
+      <div className="login-input">
+        <KeyRound size={17} />
+        <input
+          type={show ? "text" : "password"}
+          autoComplete={autoComplete}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyUp={checkCaps}
+          onKeyDown={checkCaps}
+          disabled={disabled}
+          autoFocus={autoFocus}
+        />
+        <button
+          type="button"
+          className="login-eye"
+          onClick={() => setShow((v) => !v)}
+          aria-label={show ? "Hide password" : "Show password"}
+        >
+          {show ? <EyeOff size={17} /> : <Eye size={17} />}
+        </button>
+      </div>
+      {caps && <small className="login-caps">Caps Lock is on</small>}
+    </label>
+  );
+}
+
+function readResetToken() {
+  const match = window.location.hash.match(/^#reset=([^&]+)/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
 function LoginPage({ onLogin, notice }) {
-  const [username, setUsername] = useState("");
+  const [resetToken] = useState(readResetToken);
+  const [mode, setMode] = useState(resetToken ? "reset" : "login");
+  const [username, setUsername] = useState(notice?.username || "");
   const [password, setPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
-  const [capsLock, setCapsLock] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [resetUser, setResetUser] = useState("");
+  const [resetState, setResetState] = useState(resetToken ? "checking" : "");
+  const [sent, setSent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [info, setInfo] = useState(notice?.text || "");
+  const [infoTone, setInfoTone] = useState(notice?.tone || "info");
 
-  async function submit(e) {
-    e.preventDefault();
+  const [recoveryKey, setRecoveryKey] = useState("");
+  const [resetOptions, setResetOptions] = useState(null);
+  const [forgotMethod, setForgotMethod] = useState("key");
+
+  const checks = passwordChecks(newPassword, confirmPassword);
+
+  async function loadResetOptions() {
+    setResetOptions(null);
+    try {
+      const res = await fetch(`${API_BASE}/auth/options/`, { cache: "no-store" });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) throw new Error(`HTTP ${res.status}`);
+      setResetOptions({ email: Boolean(json.emailReset), key: Boolean(json.recoveryReset) });
+      setForgotMethod(json.recoveryReset ? "key" : "email");
+    } catch {
+      setResetOptions({ email: false, key: false, failed: true });
+    }
+  }
+
+  useEffect(() => {
+    if (!resetToken) return undefined;
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    let alive = true;
+    postJSON("/auth/reset-password/check/", { token: resetToken })
+      .then(({ res, json }) => {
+        if (!alive) return;
+        if (res.ok && json?.success) {
+          setResetUser(json.username);
+          setResetState("ready");
+        } else {
+          setResetState("invalid");
+          setError(json?.error || "This reset link is invalid or has expired. Request a new one.");
+        }
+      })
+      .catch(() => {
+        if (!alive) return;
+        setResetState("invalid");
+        setError("Unable to reach the server. Check your connection and open the link again.");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [resetToken]);
+
+  function goTo(next) {
+    setError("");
+    setInfo("");
+    setInfoTone("info");
+    setSent(false);
+    setNewPassword("");
+    setConfirmPassword("");
+    setRecoveryKey("");
+    setMode(next);
+    if (next === "forgot") loadResetOptions();
+  }
+
+  function switchMethod(method) {
+    setError("");
+    setInfo("");
+    setSent(false);
+    setForgotMethod(method);
+  }
+
+  async function submitLogin() {
     if (!username.trim() || !password) {
       setError("Enter your username and password.");
       return;
     }
+    const { res, json } = await postJSON("/auth/login/", { username: username.trim(), password });
+    if (!res.ok || !json?.success) {
+      const left = json?.attemptsLeft;
+      setError(
+        (json?.error || `Sign-in failed (${res.status})`) +
+          (left != null && left <= 3 ? ` ${left} attempt${left === 1 ? "" : "s"} left.` : "")
+      );
+      setPassword("");
+      return;
+    }
+    onLogin({ token: json.token, user: json.user, expiresAt: json.expiresAt });
+  }
+
+  async function submitRecover() {
+    if (!username.trim() || !recoveryKey.trim()) {
+      setError("Enter your username and the recovery key.");
+      return;
+    }
+    if (!checks.every((c) => c.ok)) {
+      setError("The new password does not meet all the rules below.");
+      return;
+    }
+    const { res, json } = await postJSON("/auth/recover/", {
+      username: username.trim(),
+      recoveryKey,
+      newPassword,
+    });
+    if (!res.ok || !json?.success) {
+      const left = json?.attemptsLeft;
+      setError(
+        (json?.error || `The password could not be reset (${res.status}).`) +
+          (left != null && left <= 3 ? ` ${left} attempt${left === 1 ? "" : "s"} left.` : "")
+      );
+      if (json?.field === "key") setRecoveryKey("");
+      return;
+    }
+    setPassword("");
+    setNewPassword("");
+    setConfirmPassword("");
+    setRecoveryKey("");
+    setMode("login");
+    setInfoTone("success");
+    setInfo(json.message || "Your password has been reset. Sign in with the new password.");
+  }
+
+  async function submitForgot() {
+    if (forgotMethod === "key") {
+      await submitRecover();
+      return;
+    }
+    if (!username.trim()) {
+      setError("Enter your username.");
+      return;
+    }
+    const { res, json } = await postJSON("/auth/forgot-password/", { username: username.trim() });
+    if (!res.ok || !json?.success) {
+      setError(json?.error || `The request failed (${res.status}).`);
+      return;
+    }
+    setSent(true);
+    setInfoTone("success");
+    setInfo(json.message);
+  }
+
+  async function submitReset() {
+    if (!checks.every((c) => c.ok)) {
+      setError("The new password does not meet all the rules below.");
+      return;
+    }
+    const { res, json } = await postJSON("/auth/reset-password/", { token: resetToken, newPassword });
+    if (!res.ok || !json?.success) {
+      setError(json?.error || `The password could not be updated (${res.status}).`);
+      if (json?.code === "reset") setResetState("invalid");
+      return;
+    }
+    setUsername(resetUser);
+    setPassword("");
+    setNewPassword("");
+    setConfirmPassword("");
+    setMode("login");
+    setInfoTone("success");
+    setInfo(json.message || "Your password has been updated. Sign in with the new password.");
+  }
+
+  async function submit(e) {
+    e.preventDefault();
     setBusy(true);
     setError("");
+    if (mode !== "forgot") setInfo("");
     try {
-      const res = await fetch(`${API_BASE}/auth/login/`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: username.trim(), password }),
-      });
-      const json = await res.json().catch(() => null);
-      if (!res.ok || !json?.success) {
-        const left = json?.attemptsLeft;
-        setError(
-          (json?.error || `Sign-in failed (${res.status})`) +
-            (left != null && left <= 3 ? ` ${left} attempt${left === 1 ? "" : "s"} left.` : "")
-        );
-        setPassword("");
-        return;
-      }
-      onLogin({ token: json.token, user: json.user, expiresAt: json.expiresAt });
+      if (mode === "login") await submitLogin();
+      else if (mode === "forgot") await submitForgot();
+      else await submitReset();
     } catch {
       setError("Unable to reach the server. Check your connection and try again.");
     } finally {
@@ -648,7 +868,54 @@ function LoginPage({ onLogin, notice }) {
     }
   }
 
-  const checkCaps = (e) => setCapsLock(Boolean(e.getModifierState?.("CapsLock")));
+  const heading = {
+    login: { icon: <Lock size={22} />, title: "Secure sign in", sub: "Authorised DDMA personnel only" },
+    forgot: {
+      icon: forgotMethod === "key" ? <KeyRound size={22} /> : <Mail size={22} />,
+      title: "Reset your password",
+      sub:
+        forgotMethod === "key"
+          ? "Reset the password with the DDMA recovery key issued by the system administrator."
+          : "A one-time reset link will be sent to the registered DDMA email address.",
+    },
+    reset: {
+      icon: <KeyRound size={22} />,
+      title: "Set a new password",
+      sub: resetState === "ready" ? `Account: ${resetUser}` : "Password reset",
+    },
+  }[mode];
+
+  const usernameField = (
+    <label className="login-field">
+      <span>Username</span>
+      <div className="login-input">
+        <User size={17} />
+        <input
+          type="text"
+          autoComplete="username"
+          autoCapitalize="none"
+          spellCheck="false"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          disabled={busy}
+          autoFocus
+        />
+      </div>
+    </label>
+  );
+
+  const submitButton = (idle, working, Icon) => (
+    <button type="submit" className="login-submit" disabled={busy}>
+      {busy ? <RefreshCw size={17} className="spin" /> : <Icon size={17} />}
+      {busy ? working : idle}
+    </button>
+  );
+
+  const backLink = (
+    <button type="button" className="login-link center" onClick={() => goTo("login")} disabled={busy}>
+      <ArrowLeft size={15} /> Back to sign in
+    </button>
+  );
 
   return (
     <div className="login-page">
@@ -688,63 +955,149 @@ function LoginPage({ onLogin, notice }) {
 
       <main className="login-panel">
         <form className="login-card" onSubmit={submit} noValidate>
-          <div className="login-lock"><Lock size={22} /></div>
-          <h2>Secure sign in</h2>
-          <p className="login-sub">Authorised DDMA personnel only</p>
+          <div className="login-lock">{heading.icon}</div>
+          <h2>{heading.title}</h2>
+          <p className="login-sub">{heading.sub}</p>
 
-          {notice && !error && (
-            <div className="login-alert info" role="status"><Info size={16} /> <span>{notice}</span></div>
+          {info && !error && (
+            <div className={`login-alert ${infoTone}`} role="status">
+              {infoTone === "success" ? <CheckCircle2 size={16} /> : <Info size={16} />} <span>{info}</span>
+            </div>
           )}
           {error && (
             <div className="login-alert" role="alert"><AlertTriangle size={16} /> <span>{error}</span></div>
           )}
 
-          <label className="login-field">
-            <span>Username</span>
-            <div className="login-input">
-              <User size={17} />
-              <input
-                type="text"
-                autoComplete="username"
-                autoCapitalize="none"
-                spellCheck="false"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                disabled={busy}
-                autoFocus
-              />
-            </div>
-          </label>
-
-          <label className="login-field">
-            <span>Password</span>
-            <div className="login-input">
-              <KeyRound size={17} />
-              <input
-                type={showPassword ? "text" : "password"}
+          {mode === "login" && (
+            <>
+              {usernameField}
+              <PasswordInput
+                label="Password"
                 autoComplete="current-password"
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                onKeyUp={checkCaps}
-                onKeyDown={checkCaps}
+                onChange={setPassword}
                 disabled={busy}
               />
-              <button
-                type="button"
-                className="login-eye"
-                onClick={() => setShowPassword((v) => !v)}
-                aria-label={showPassword ? "Hide password" : "Show password"}
-              >
-                {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
-              </button>
-            </div>
-            {capsLock && <small className="login-caps">Caps Lock is on</small>}
-          </label>
+              <div className="login-row">
+                <button type="button" className="login-link" onClick={() => goTo("forgot")} disabled={busy}>
+                  Reset password?
+                </button>
+              </div>
+              {submitButton("Sign in", "Verifying…", LogIn)}
+            </>
+          )}
 
-          <button type="submit" className="login-submit" disabled={busy}>
-            {busy ? <RefreshCw size={17} className="spin" /> : <LogIn size={17} />}
-            {busy ? "Verifying…" : "Sign in"}
-          </button>
+          {mode === "forgot" && (
+            <>
+              {!resetOptions && (
+                <p className="login-wait"><RefreshCw size={16} className="spin" /> Checking reset options…</p>
+              )}
+
+              {resetOptions && !resetOptions.email && !resetOptions.key && (
+                <div className="login-alert info" role="status">
+                  <Info size={16} />
+                  <span>
+                    {resetOptions.failed
+                      ? "Unable to reach the server. Check your connection and try again."
+                      : "Password reset is not set up on this server. Contact the system administrator."}
+                  </span>
+                </div>
+              )}
+
+              {resetOptions?.key && forgotMethod === "key" && (
+                <>
+                  {usernameField}
+                  <label className="login-field">
+                    <span>Recovery key</span>
+                    <div className="login-input">
+                      <ShieldCheck size={17} />
+                      <input
+                        type="text"
+                        className="login-key"
+                        autoComplete="off"
+                        autoCapitalize="characters"
+                        spellCheck="false"
+                        placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX"
+                        value={recoveryKey}
+                        onChange={(e) => setRecoveryKey(e.target.value)}
+                        disabled={busy}
+                      />
+                    </div>
+                  </label>
+                  <PasswordInput
+                    label="New password"
+                    autoComplete="new-password"
+                    value={newPassword}
+                    onChange={setNewPassword}
+                    disabled={busy}
+                  />
+                  <PasswordInput
+                    label="Confirm new password"
+                    autoComplete="new-password"
+                    value={confirmPassword}
+                    onChange={setConfirmPassword}
+                    disabled={busy}
+                  />
+                  <PasswordRules checks={checks} />
+                  {submitButton("Reset password", "Saving…", ShieldCheck)}
+                  {resetOptions.email && (
+                    <button type="button" className="login-link center" onClick={() => switchMethod("email")} disabled={busy}>
+                      <Mail size={15} /> Email me a reset link instead
+                    </button>
+                  )}
+                </>
+              )}
+
+              {resetOptions?.email && forgotMethod === "email" && (
+                <>
+                  {!sent && usernameField}
+                  {!sent && submitButton("Send reset link", "Sending…", Mail)}
+                  {resetOptions.key && (
+                    <button type="button" className="login-link center" onClick={() => switchMethod("key")} disabled={busy}>
+                      <KeyRound size={15} /> Use the recovery key instead
+                    </button>
+                  )}
+                </>
+              )}
+
+              {backLink}
+            </>
+          )}
+
+          {mode === "reset" && (
+            <>
+              {resetState === "checking" && (
+                <p className="login-wait"><RefreshCw size={16} className="spin" /> Checking the reset link…</p>
+              )}
+              {resetState === "ready" && (
+                <>
+                  <PasswordInput
+                    label="New password"
+                    autoComplete="new-password"
+                    value={newPassword}
+                    onChange={setNewPassword}
+                    disabled={busy}
+                    autoFocus
+                  />
+                  <PasswordInput
+                    label="Confirm new password"
+                    autoComplete="new-password"
+                    value={confirmPassword}
+                    onChange={setConfirmPassword}
+                    disabled={busy}
+                  />
+                  <PasswordRules checks={checks} />
+                  {submitButton("Update password", "Saving…", ShieldCheck)}
+                </>
+              )}
+              {resetState === "invalid" && (
+                <button type="button" className="login-submit" onClick={() => goTo("forgot")}>
+                  <Mail size={17} /> Request a new link
+                </button>
+              )}
+              {backLink}
+            </>
+          )}
 
           <p className="login-legal">
             <ShieldCheck size={14} /> This is a restricted government system. Access is monitored and sessions
@@ -756,6 +1109,107 @@ function LoginPage({ onLogin, notice }) {
           Developed by Centre for AI-IoT Innovation · ASIET
         </p>
       </main>
+    </div>
+  );
+}
+
+function ChangePasswordDialog({ onClose, onChanged }) {
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const checks = passwordChecks(next, confirm);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape" && !busy) onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, onClose]);
+
+  async function submit(e) {
+    e.preventDefault();
+    if (!current) {
+      setError("Enter your current password.");
+      return;
+    }
+    if (!checks.every((c) => c.ok)) {
+      setError("The new password does not meet all the rules below.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const { res, json } = await postJSON(
+        "/auth/change-password/",
+        { currentPassword: current, newPassword: next },
+        true
+      );
+      if (res.status === 401) {
+        onAuthLost?.(json?.error || "Your session has expired. Please sign in again.");
+        return;
+      }
+      if (!res.ok || !json?.success) {
+        setError(json?.error || `The password could not be changed (${res.status}).`);
+        if (json?.field === "current") setCurrent("");
+        return;
+      }
+      onChanged();
+    } catch {
+      setError("Unable to reach the server. Check your connection and try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && !busy && onClose()}>
+      <div className="modal-card" role="dialog" aria-modal="true" aria-labelledby="pw-dialog-title">
+        <button type="button" className="modal-close" onClick={onClose} disabled={busy} aria-label="Close">
+          <X size={18} />
+        </button>
+        <div className="login-lock"><KeyRound size={22} /></div>
+        <h2 id="pw-dialog-title">Change password</h2>
+
+        <form className="modal-form" onSubmit={submit} noValidate>
+          <p className="modal-sub">After the update you are signed out on all devices. Sign in again with the new password.</p>
+          {error && (
+            <div className="login-alert" role="alert"><AlertTriangle size={16} /> <span>{error}</span></div>
+          )}
+          <PasswordInput
+            label="Current password"
+            autoComplete="current-password"
+            value={current}
+            onChange={setCurrent}
+            disabled={busy}
+            autoFocus
+          />
+          <PasswordInput
+            label="New password"
+            autoComplete="new-password"
+            value={next}
+            onChange={setNext}
+            disabled={busy}
+          />
+          <PasswordInput
+            label="Confirm new password"
+            autoComplete="new-password"
+            value={confirm}
+            onChange={setConfirm}
+            disabled={busy}
+          />
+          <PasswordRules checks={checks} />
+          <div className="modal-actions">
+            <button type="button" className="btn-outline" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn-solid" disabled={busy}>
+              {busy ? <RefreshCw size={15} className="spin" /> : <ShieldCheck size={15} />}
+              {busy ? "Saving…" : "Update password"}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
@@ -804,17 +1258,30 @@ function ChartTooltip({ active, payload }) {
 
 export default function App() {
   const [session, setSession] = useState(() => {
+    if (readResetToken()) {
+      clearSession();
+      authToken = null;
+      return null;
+    }
     const saved = loadSession();
     authToken = saved?.token || null;
     return saved;
   });
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState(null);
 
-  const logout = useCallback((message = "") => {
+  const logout = useCallback((message = "", tone = "info", username = "") => {
     authToken = null;
     clearSession();
     setSession(null);
-    setNotice(message);
+    setNotice(message ? { text: message, tone, username } : null);
+  }, []);
+
+  useEffect(() => {
+    const onHash = () => {
+      if (readResetToken()) window.location.reload();
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
   useEffect(() => {
@@ -838,15 +1305,24 @@ export default function App() {
   const login = (next) => {
     authToken = next.token;
     saveSession(next);
-    setNotice("");
+    setNotice(null);
     setSession(next);
   };
 
   if (!session) return <LoginPage onLogin={login} notice={notice} />;
-  return <Dashboard key={session.token} session={session} onLogout={() => logout("You have been signed out.")} />;
+  return (
+    <Dashboard
+      key={session.user?.username || "dashboard"}
+      session={session}
+      onPasswordChanged={() =>
+        logout("Password updated successfully. Sign in with your new password.", "success", session.user?.username)
+      }
+      onLogout={() => logout("You have been signed out.")}
+    />
+  );
 }
 
-function Dashboard({ session, onLogout }) {
+function Dashboard({ session, onLogout, onPasswordChanged }) {
   const [stations, setStations] = useState(DEFAULT_STATIONS);
   const [stationId, setStationId] = useState(() => readSelected() || DEFAULT_STATIONS[0].id);
   const [records, setRecords] = useState({});
@@ -860,6 +1336,8 @@ function Dashboard({ session, onLogout }) {
   const [dlPeriod, setDlPeriod] = useState("30d");
   const [dlBusy, setDlBusy] = useState(false);
   const [dlError, setDlError] = useState("");
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  const closePassword = useCallback(() => setPasswordOpen(false), []);
   const stationsRef = useRef(DEFAULT_STATIONS);
 
   const isMobile = useMediaQuery("(max-width: 640px)");
@@ -1230,6 +1708,9 @@ function Dashboard({ session, onLogout }) {
             <div className="user-chip">
               <UserCircle2 size={15} />
               <span className="hide-xs">{session.user?.name || session.user?.username}</span>
+              <button onClick={() => setPasswordOpen(true)} aria-label="Change password">
+                <KeyRound size={14} /><span className="hide-xs">Password</span>
+              </button>
               <button onClick={onLogout} aria-label="Sign out"><LogOut size={14} /><span className="hide-xs">Sign out</span></button>
             </div>
           </div>
@@ -1711,6 +2192,8 @@ function Dashboard({ session, onLogout }) {
           © {new Date().getFullYear()} DDMA Ernakulam · Automatic Rain Gauge Monitoring System
         </div>
       </footer>
+
+      {passwordOpen && <ChangePasswordDialog onClose={closePassword} onChanged={onPasswordChanged} />}
     </div>
   );
 }
