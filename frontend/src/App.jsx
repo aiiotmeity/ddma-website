@@ -1708,9 +1708,9 @@ function Dashboard({ session, onLogout, onPasswordChanged }) {
             <div className="user-chip">
               <UserCircle2 size={15} />
               <span className="hide-xs">{session.user?.name || session.user?.username}</span>
-              <button onClick={() => setPasswordOpen(true)} aria-label="Change password">
+              {/* <button onClick={() => setPasswordOpen(true)} aria-label="Change password">
                 <KeyRound size={14} /><span className="hide-xs">Password</span>
-              </button>
+              </button> */}
               <button onClick={onLogout} aria-label="Sign out"><LogOut size={14} /><span className="hide-xs">Sign out</span></button>
             </div>
           </div>
